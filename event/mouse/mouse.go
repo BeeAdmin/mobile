@@ -40,16 +40,24 @@ type Event struct {
 // Button is a mouse button.
 type Button int32
 
+// IsWheel reports whether the button is for a scroll wheel.
+func (b Button) IsWheel() bool {
+	return b < 0
+}
+
 // TODO: have a separate axis concept for wheel up/down? How does that relate
 // to joystick events?
 
 const (
-	ButtonNone      Button = +0
-	ButtonLeft      Button = +1
-	ButtonMiddle    Button = +2
-	ButtonRight     Button = +3
-	ButtonWheelUp   Button = -1
-	ButtonWheelDown Button = -2
+	ButtonNone   Button = +0
+	ButtonLeft   Button = +1
+	ButtonMiddle Button = +2
+	ButtonRight  Button = +3
+
+	ButtonWheelUp    Button = -1
+	ButtonWheelDown  Button = -2
+	ButtonWheelLeft  Button = -3
+	ButtonWheelRight Button = -4
 )
 
 // Direction is the direction of the mouse event.
@@ -59,6 +67,11 @@ const (
 	DirNone    Direction = 0
 	DirPress   Direction = 1
 	DirRelease Direction = 2
+	// DirStep is a simultaneous press and release, such as a single step of a
+	// mouse wheel.
+	//
+	// Its value equals DirPress | DirRelease.
+	DirStep Direction = 3
 )
 
 func (d Direction) String() string {
@@ -69,6 +82,8 @@ func (d Direction) String() string {
 		return "Press"
 	case DirRelease:
 		return "Release"
+	case DirStep:
+		return "Step"
 	default:
 		return fmt.Sprintf("mouse.Direction(%d)", d)
 	}

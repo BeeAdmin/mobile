@@ -8,6 +8,15 @@ type I interface {
 	Rand() int32
 }
 
+type SameI interface {
+	Rand() int32
+}
+
+type LargerI interface {
+	Rand() int32
+	AnotherFunc()
+}
+
 func Add3(r I) int32 {
 	return r.Rand() + r.Rand() + r.Rand()
 }
@@ -53,3 +62,8 @@ type I3 interface {
 // not bound
 func F() seven  { return seven{} }
 func G(u seven) {}
+
+// Interfaces is an interface with the same name as its package.
+type Interfaces interface {
+	SomeMethod()
+}

@@ -2,15 +2,17 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin linux,!android
+// +build darwin linux,!android windows
 
 package al
 
 /*
 #cgo darwin   CFLAGS:  -DGOOS_darwin
 #cgo linux    CFLAGS:  -DGOOS_linux
+#cgo windows  CFLAGS:  -DGOOS_windows
 #cgo darwin   LDFLAGS: -framework OpenAL
 #cgo linux    LDFLAGS: -lopenal
+#cgo windows  LDFLAGS: -lOpenAL32
 
 #ifdef GOOS_darwin
 #include <stdlib.h>
@@ -18,6 +20,12 @@ package al
 #endif
 
 #ifdef GOOS_linux
+#include <stdlib.h>
+#include <AL/al.h>  // install on Ubuntu with: sudo apt-get install libopenal-dev
+#endif
+
+#ifdef GOOS_windows
+#include <windows.h>
 #include <stdlib.h>
 #include <AL/al.h>
 #endif
@@ -41,8 +49,32 @@ func alGetInteger(k int) int32 {
 	return int32(C.alGetInteger(C.ALenum(k)))
 }
 
+func alGetIntegerv(k int, v []int32) {
+	C.alGetIntegerv(C.ALenum(k), (*C.ALint)(unsafe.Pointer(&v[0])))
+}
+
 func alGetFloat(k int) float32 {
 	return float32(C.alGetFloat(C.ALenum(k)))
+}
+
+func alGetFloatv(k int, v []float32) {
+	C.alGetFloatv(C.ALenum(k), (*C.ALfloat)(unsafe.Pointer(&v[0])))
+}
+
+func alGetBoolean(k int) bool {
+	return C.alGetBoolean(C.ALenum(k)) == C.AL_TRUE
+}
+
+func alGetBooleanv(k int, v []bool) {
+	val := make([]C.ALboolean, len(v))
+	for i, bv := range v {
+		if bv {
+			val[i] = C.AL_TRUE
+		} else {
+			val[i] = C.AL_FALSE
+		}
+	}
+	C.alGetBooleanv(C.ALenum(k), &val[0])
 }
 
 func alGetString(v int) string {

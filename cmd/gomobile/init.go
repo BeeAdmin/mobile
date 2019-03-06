@@ -4,96 +4,56 @@
 
 package main
 
-// TODO(crawshaw): android/{386,arm64}
-
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 )
 
-// useStrippedNDK determines whether the init subcommand fetches the GCC
-// toolchain from the original Android NDK, or from the stripped-down NDK
-// hosted specifically for the gomobile tool.
-//
-// There is a significant size different (400MB compared to 30MB).
-var useStrippedNDK = true
-
-const ndkVersion = "ndk-r10e"
-const openALVersion = "openal-soft-1.16.0.1"
-
 var (
-	goos    = runtime.GOOS
-	goarch  = runtime.GOARCH
-	ndkarch string
+	goos   = runtime.GOOS
+	goarch = runtime.GOARCH
 )
-
-func init() {
-	switch runtime.GOARCH {
-	case "amd64":
-		ndkarch = "x86_64"
-	case "386":
-		ndkarch = "x86"
-	default:
-		ndkarch = runtime.GOARCH
-	}
-}
 
 var cmdInit = &command{
 	run:   runInit,
 	Name:  "init",
-	Usage: "[-u]",
-	Short: "install android compiler toolchain",
+	Usage: "[-openal dir]",
+	Short: "build OpenAL for Android",
 	Long: `
-Init installs the Android C++ compiler toolchain and builds copies
-of the Go standard library for mobile devices.
-
-When first run, it downloads part of the Android NDK.
-The toolchain is installed in $GOPATH/pkg/gomobile.
-
-The -u option forces download and installation of the new toolchain
-even when the toolchain exists.
+If a OpenAL source directory is specified with -openal, init will
+build an Android version of OpenAL for use with gomobile build
+and gomobile install.
 `,
 }
 
-var initU bool // -u
+var initOpenAL string // -openal
 
 func init() {
-	cmdInit.flag.BoolVar(&initU, "u", false, "force toolchain download")
+	cmdInit.flag.StringVar(&initOpenAL, "openal", "", "OpenAL source path")
 }
 
 func runInit(cmd *command) error {
-	version, err := goVersion()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, version)
-	}
-
 	gopaths := filepath.SplitList(goEnv("GOPATH"))
 	if len(gopaths) == 0 {
 		return fmt.Errorf("GOPATH is not set")
 	}
 	gomobilepath = filepath.Join(gopaths[0], "pkg/gomobile")
-	ndkccpath = filepath.Join(gopaths[0], "pkg/gomobile/android-"+ndkVersion)
-	verpath := filepath.Join(gopaths[0], "pkg/gomobile/version")
+
 	if buildX || buildN {
 		fmt.Fprintln(xout, "GOMOBILE="+gomobilepath)
 	}
-	removeGomobilepkg()
+	removeAll(gomobilepath)
 
-	if err := mkdir(ndkccpath); err != nil {
+	if err := mkdir(gomobilepath); err != nil {
 		return err
 	}
 
@@ -117,52 +77,133 @@ func runInit(cmd *command) error {
 		removeAll(tmpdir)
 	}()
 
-	if err := fetchNDK(); err != nil {
-		return err
-	}
-	if err := fetchOpenAL(); err != nil {
-		return err
-	}
-
-	if err := envInit(); err != nil {
+	// Make sure gobind is up to date.
+	if err := goInstall([]string{"golang.org/x/mobile/cmd/gobind"}, nil); err != nil {
 		return err
 	}
 
-	if runtime.GOOS == "darwin" {
-		// Install common x/mobile packages for local development.
-		// These are often slow to compile (due to cgo) and easy to forget.
-		//
-		// Limited to darwin for now as it is common for linux to
-		// not have GLES installed.
-		//
-		// TODO: consider testing GLES installation and suggesting it here
-		for _, pkg := range commonPkgs {
-			if err := installPkg(pkg, nil); err != nil {
+	if buildN {
+		initOpenAL = "$OPENAL_PATH"
+	} else {
+		if initOpenAL != "" {
+			var err error
+			if initOpenAL, err = filepath.Abs(initOpenAL); err != nil {
 				return err
 			}
 		}
 	}
+	if err := envInit(); err != nil {
+		return err
+	}
 
-	// Install standard libraries for cross compilers.
 	start := time.Now()
-	if err := installStd(androidArmEnv, "-buildmode=c-shared"); err != nil {
-		return err
-	}
-	if err := installDarwin(); err != nil {
+
+	if err := installOpenAL(gomobilepath); err != nil {
 		return err
 	}
 
-	if buildX || buildN {
-		printcmd("go version > %s", verpath)
-	}
-	if !buildN {
-		if err := ioutil.WriteFile(verpath, version, 0644); err != nil {
-			return err
-		}
-	}
 	if buildV {
 		took := time.Since(start) / time.Second * time.Second
 		fmt.Fprintf(os.Stderr, "\nDone, build took %s.\n", took)
+	}
+	return nil
+}
+
+func installOpenAL(gomobilepath string) error {
+	if initOpenAL == "" {
+		return nil
+	}
+	ndkRoot, err := ndkRoot()
+	if err != nil {
+		return err
+	}
+
+	var cmake string
+	if buildN {
+		cmake = "cmake"
+	} else {
+		sdkRoot := os.Getenv("ANDROID_HOME")
+		if sdkRoot == "" {
+			return nil
+		}
+		var err error
+		cmake, err = exec.LookPath("cmake")
+		if err != nil {
+			cmakePath := filepath.Join(sdkRoot, "cmake")
+			cmakeDir, err := os.Open(cmakePath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					// Skip OpenAL install if the cmake package is not installed.
+					return errors.New("cmake was not found in the PATH. Please install it through the Android SDK manager.")
+				}
+				return err
+			}
+			defer cmakeDir.Close()
+			// There might be multiple versions of CMake installed. Use any one for now.
+			cmakeVers, err := cmakeDir.Readdirnames(1)
+			if err != nil || len(cmakeVers) == 0 {
+				return errors.New("cmake was not found in the PATH. Please install it through the Android SDK manager.")
+			}
+			cmake = filepath.Join(cmakePath, cmakeVers[0], "bin", "cmake")
+		}
+	}
+	var alTmpDir string
+	if buildN {
+		alTmpDir = filepath.Join(gomobilepath, "work")
+	} else {
+		var err error
+		alTmpDir, err = ioutil.TempDir(gomobilepath, "openal-release-")
+		if err != nil {
+			return err
+		}
+		defer removeAll(alTmpDir)
+	}
+
+	for _, f := range []string{"include/AL/al.h", "include/AL/alc.h"} {
+		dst := filepath.Join(gomobilepath, f)
+		src := filepath.Join(initOpenAL, f)
+		if err := copyFile(dst, src); err != nil {
+			return err
+		}
+	}
+
+	for _, arch := range allArchs {
+		t := ndk[arch]
+		abi := t.arch
+		if abi == "arm" {
+			abi = "armeabi"
+		}
+		make := filepath.Join(ndkRoot, "prebuilt", archNDK(), "bin", "make")
+		// Split android-XX to get the api version.
+		buildDir := alTmpDir + "/build/" + abi
+		if err := mkdir(buildDir); err != nil {
+			return err
+		}
+		cmd := exec.Command(cmake,
+			initOpenAL,
+			"-DCMAKE_TOOLCHAIN_FILE="+initOpenAL+"/XCompile-Android.txt",
+			"-DHOST="+t.clangPrefix)
+		cmd.Dir = buildDir
+		tcPath := filepath.Join(ndkRoot, "toolchains", "llvm", "prebuilt", archNDK(), "bin")
+		if !buildN {
+			orgPath := os.Getenv("PATH")
+			cmd.Env = []string{"PATH=" + tcPath + string(os.PathListSeparator) + orgPath}
+		}
+		if err := runCmd(cmd); err != nil {
+			return err
+		}
+
+		cmd = exec.Command(make)
+		cmd.Dir = buildDir
+		if err := runCmd(cmd); err != nil {
+			return err
+		}
+
+		dst := filepath.Join(gomobilepath, "lib", t.abi, "libopenal.so")
+		src := filepath.Join(alTmpDir, "build", abi, "libopenal.so")
+		if err := copyFile(dst, src); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -171,96 +212,6 @@ var commonPkgs = []string{
 	"golang.org/x/mobile/gl",
 	"golang.org/x/mobile/app",
 	"golang.org/x/mobile/exp/app/debug",
-}
-
-func installDarwin() error {
-	if goos != "darwin" {
-		return nil // Only build iOS compilers on OS X.
-	}
-	if err := installStd(darwinArmEnv); err != nil {
-		return err
-	}
-	if err := installStd(darwinArm64Env); err != nil {
-		return err
-	}
-	// TODO(crawshaw): darwin/386 for the iOS simulator?
-	if err := installStd(darwinAmd64Env, "-tags=ios"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func installStd(env []string, args ...string) error {
-	return installPkg("std", env, args...)
-}
-
-func installPkg(pkg string, env []string, args ...string) error {
-	tOS, tArch, pd := getenv(env, "GOOS"), getenv(env, "GOARCH"), pkgdir(env)
-	if tOS != "" && tArch != "" {
-		if buildV {
-			fmt.Fprintf(os.Stderr, "\n# Installing %s for %s/%s.\n", pkg, tOS, tArch)
-		}
-		args = append(args, "-pkgdir="+pd)
-	} else {
-		if buildV {
-			fmt.Fprintf(os.Stderr, "\n# Installing %s.\n", pkg)
-		}
-	}
-
-	// The -p flag is to speed up darwin/arm builds.
-	// Remove when golang.org/issue/10477 is resolved.
-	cmd := exec.Command("go", "install", fmt.Sprintf("-p=%d", runtime.NumCPU()))
-	cmd.Args = append(cmd.Args, args...)
-	if buildV {
-		cmd.Args = append(cmd.Args, "-v")
-	}
-	if buildX {
-		cmd.Args = append(cmd.Args, "-x")
-	}
-	if buildWork {
-		cmd.Args = append(cmd.Args, "-work")
-	}
-	cmd.Args = append(cmd.Args, pkg)
-	cmd.Env = append([]string{}, env...)
-	return runCmd(cmd)
-}
-
-func removeGomobilepkg() {
-	dir, err := os.Open(gomobilepath)
-	if err != nil {
-		return
-	}
-	names, err := dir.Readdirnames(-1)
-	if err != nil {
-		return
-	}
-	for _, name := range names {
-		if name == "dl" {
-			continue
-		}
-		removeAll(filepath.Join(gomobilepath, name))
-	}
-}
-
-func move(dst, src string, names ...string) error {
-	for _, name := range names {
-		srcf := filepath.Join(src, name)
-		dstf := filepath.Join(dst, name)
-		if buildX || buildN {
-			printcmd("mv %s %s", srcf, dstf)
-		}
-		if buildN {
-			continue
-		}
-		if goos == "windows" {
-			// os.Rename fails if dstf already exists.
-			removeAll(dstf)
-		}
-		if err := os.Rename(srcf, dstf); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func mkdir(dir string) error {
@@ -294,264 +245,6 @@ func rm(name string) error {
 		return nil
 	}
 	return os.Remove(name)
-}
-
-func goVersion() ([]byte, error) {
-	gobin, err := exec.LookPath("go")
-	if err != nil {
-		return nil, fmt.Errorf(`no Go tool on $PATH`)
-	}
-	buildHelp, err := exec.Command(gobin, "help", "build").CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("bad Go tool: %v (%s)", err, buildHelp)
-	}
-	// TODO(crawshaw): this is a crude test for Go 1.5. After release,
-	// remove this and check it is not an old release version.
-	if !bytes.Contains(buildHelp, []byte("-pkgdir")) {
-		return nil, fmt.Errorf("installed Go tool does not support -pkgdir")
-	}
-	return exec.Command(gobin, "version").CombinedOutput()
-}
-
-func fetchOpenAL() error {
-	url := "https://dl.google.com/go/mobile/gomobile-" + openALVersion + ".tar.gz"
-	archive, err := fetch(url)
-	if err != nil {
-		return err
-	}
-	if err := extract("openal", archive); err != nil {
-		return err
-	}
-	if goos == "windows" {
-		resetReadOnlyFlagAll(filepath.Join(tmpdir, "openal"))
-	}
-	dst := filepath.Join(ndkccpath, "arm", "sysroot", "usr", "include")
-	src := filepath.Join(tmpdir, "openal", "include")
-	if err := move(dst, src, "AL"); err != nil {
-		return err
-	}
-	libDst := filepath.Join(ndkccpath, "openal")
-	libSrc := filepath.Join(tmpdir, "openal")
-	if err := mkdir(libDst); err != nil {
-		return nil
-	}
-	if err := move(libDst, libSrc, "lib"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func extract(dst, src string) error {
-	if buildX || buildN {
-		printcmd("tar xfz %s", src)
-	}
-	if buildN {
-		return nil
-	}
-	tf, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer tf.Close()
-	zr, err := gzip.NewReader(tf)
-	if err != nil {
-		return err
-	}
-	tr := tar.NewReader(zr)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		dst := filepath.Join(tmpdir, dst+"/"+hdr.Name)
-		if hdr.Typeflag == tar.TypeSymlink {
-			if err := symlink(hdr.Linkname, dst); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-			return err
-		}
-		f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(hdr.Mode)&0777)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(f, tr); err != nil {
-			return err
-		}
-		if err := f.Close(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func fetchNDK() error {
-	if useStrippedNDK {
-		if err := fetchStrippedNDK(); err != nil {
-			return err
-		}
-	} else {
-		if err := fetchFullNDK(); err != nil {
-			return err
-		}
-	}
-	if goos == "windows" {
-		resetReadOnlyFlagAll(filepath.Join(tmpdir, "android-"+ndkVersion))
-	}
-
-	dst := filepath.Join(ndkccpath, "arm")
-	dstSysroot := filepath.Join(dst, "sysroot/usr")
-	if err := mkdir(dstSysroot); err != nil {
-		return err
-	}
-
-	srcSysroot := filepath.Join(tmpdir, "android-"+ndkVersion+"/platforms/android-15/arch-arm/usr")
-	if err := move(dstSysroot, srcSysroot, "include", "lib"); err != nil {
-		return err
-	}
-
-	ndkpath := filepath.Join(tmpdir, "android-"+ndkVersion+"/toolchains/arm-linux-androideabi-4.8/prebuilt")
-	if goos == "windows" && ndkarch == "x86" {
-		ndkpath = filepath.Join(ndkpath, "windows")
-	} else {
-		ndkpath = filepath.Join(ndkpath, goos+"-"+ndkarch)
-	}
-	if err := move(dst, ndkpath, "bin", "lib", "libexec"); err != nil {
-		return err
-	}
-
-	linkpath := filepath.Join(dst, "arm-linux-androideabi/bin")
-	if err := mkdir(linkpath); err != nil {
-		return err
-	}
-	for _, name := range []string{"ld", "as", "gcc", "g++"} {
-		if goos == "windows" {
-			name += ".exe"
-		}
-		if err := symlink(filepath.Join(dst, "bin", "arm-linux-androideabi-"+name), filepath.Join(linkpath, name)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func fetchStrippedNDK() error {
-	url := "https://dl.google.com/go/mobile/gomobile-" + ndkVersion + "-" + goos + "-" + ndkarch + ".tar.gz"
-	archive, err := fetch(url)
-	if err != nil {
-		return err
-	}
-	return extract("", archive)
-}
-
-func fetchFullNDK() error {
-	url := "https://dl.google.com/android/ndk/android-" + ndkVersion + "-" + goos + "-" + ndkarch + "."
-	if goos == "windows" {
-		url += "exe"
-	} else {
-		url += "bin"
-	}
-	archive, err := fetch(url)
-	if err != nil {
-		return err
-	}
-
-	// The self-extracting ndk dist file for Windows terminates
-	// with an error (error code 2 - corrupted or incomplete file)
-	// but there are no details on what caused this.
-	//
-	// Strangely, if the file is launched from file browser or
-	// unzipped with 7z.exe no error is reported.
-	//
-	// In general we use the stripped NDK, so this code path
-	// is not used, and 7z.exe is not a normal dependency.
-	var inflate *exec.Cmd
-	if goos != "windows" {
-		// The downloaded archive is executed on linux and os x to unarchive.
-		// To do this execute permissions are needed.
-		os.Chmod(archive, 0755)
-
-		inflate = exec.Command(archive)
-	} else {
-		inflate = exec.Command("7z.exe", "x", archive)
-	}
-	inflate.Dir = tmpdir
-	return runCmd(inflate)
-}
-
-// fetch reads a URL into $GOPATH/pkg/gomobile/dl and returns the path
-// to the downloaded file. Downloading is skipped if the file is
-// already present.
-func fetch(url string) (dst string, err error) {
-	if err := mkdir(filepath.Join(gomobilepath, "dl")); err != nil {
-		return "", err
-	}
-	name := path.Base(url)
-	dst = filepath.Join(gomobilepath, "dl", name)
-
-	// Use what's in the cache if force update is not required.
-	if !initU {
-		if buildX {
-			printcmd("stat %s", dst)
-		}
-		if _, err = os.Stat(dst); err == nil {
-			return dst, nil
-		}
-	}
-	if buildX {
-		printcmd("curl -o%s %s", dst, url)
-	}
-	if buildN {
-		return dst, nil
-	}
-
-	if buildV {
-		fmt.Fprintf(os.Stderr, "Downloading %s.\n", url)
-	}
-
-	f, err := ioutil.TempFile(tmpdir, "partial-"+name)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			f.Close()
-			os.Remove(f.Name())
-		}
-	}()
-	hashw := sha256.New()
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("error fetching %v, status: %v", url, resp.Status)
-	} else {
-		_, err = io.Copy(io.MultiWriter(hashw, f), resp.Body)
-	}
-	if err2 := resp.Body.Close(); err == nil {
-		err = err2
-	}
-	if err != nil {
-		return "", err
-	}
-	if err = f.Close(); err != nil {
-		return "", err
-	}
-	hash := hex.EncodeToString(hashw.Sum(nil))
-	if fetchHashes[name] != hash {
-		return "", fmt.Errorf("sha256 for %q: %v, want %v", name, hash, fetchHashes[name])
-	}
-	if err = os.Rename(f.Name(), dst); err != nil {
-		return "", err
-	}
-	return dst, nil
 }
 
 func doCopyAll(dst, src string) error {

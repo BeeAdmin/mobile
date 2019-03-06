@@ -7,20 +7,13 @@ package main
 import (
 	"errors"
 	"fmt"
-	"go/ast"
 	"go/build"
-	"go/parser"
-	"go/scanner"
-	"go/token"
-	"go/types"
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
-	"strings"
-
-	"golang.org/x/mobile/bind"
-	"golang.org/x/mobile/internal/loader"
 )
 
 // ctx, pkg, tmpdir in build.go
@@ -28,7 +21,7 @@ import (
 var cmdBind = &command{
 	run:   runBind,
 	Name:  "bind",
-	Usage: "[-target android|ios] [-o output] [build flags] [package]",
+	Usage: "[-target android|ios] [-bootclasspath <path>] [-classpath <path>] [-o output] [build flags] [package]",
 	Short: "build a library for Android and iOS",
 	Long: `
 Bind generates language bindings for the package named by the import
@@ -47,18 +40,27 @@ example, in Android Studio (1.2+), an AAR file can be imported using
 the module import wizard (File > New > New Module > Import .JAR or
 .AAR package), and setting it as a new dependency
 (File > Project Structure > Dependencies).  This requires 'javac'
-(version 1.7+) and Android SDK (API level 9 or newer) to build the
+(version 1.7+) and Android SDK (API level 15 or newer) to build the
 library for Android. The environment variable ANDROID_HOME must be set
-to the path to Android SDK. The generated Java class is in the java
-package 'go.<package_name>' unless -javapkg flag is specified.
+to the path to Android SDK. Use the -javapkg flag to specify the Java
+package prefix for the generated classes.
+
+By default, -target=android builds shared libraries for all supported
+instruction sets (arm, arm64, 386, amd64). A subset of instruction sets
+can be selected by specifying target type with the architecture name. E.g.,
+-target=android/arm,android/386.
 
 For -target ios, gomobile must be run on an OS X machine with Xcode
-installed. Support is not complete. The generated Objective-C types
-are prefixed with 'Go' unless the -prefix flag is provided.
+installed. The generated Objective-C types can be prefixed with the -prefix
+flag.
+
+For -target android, the -bootclasspath and -classpath flags are used to
+control the bootstrap classpath and the classpath for Go wrappers to Java
+classes.
 
 The -v flag provides verbose output, including the list of packages built.
 
-The build flags -a, -i, -n, -x, -gcflags, -ldflags, -tags, and -work
+The build flags -a, -n, -x, -gcflags, -ldflags, -tags, and -work
 are shared with the build command. For documentation, see 'go help build'.
 `,
 }
@@ -72,15 +74,17 @@ func runBind(cmd *command) error {
 
 	args := cmd.flag.Args()
 
-	ctx.GOARCH = "arm"
-	switch buildTarget {
-	case "android":
-		ctx.GOOS = "android"
-	case "ios":
-		ctx.GOOS = "darwin"
-	default:
-		return fmt.Errorf(`unknown -target, %q.`, buildTarget)
+	targetOS, targetArchs, err := parseBuildTarget(buildTarget)
+	if err != nil {
+		return fmt.Errorf(`invalid -target=%q: %v`, buildTarget, err)
 	}
+
+	oldCtx := ctx
+	defer func() {
+		ctx = oldCtx
+	}()
+	ctx.GOARCH = "arm"
+	ctx.GOOS = targetOS
 
 	if bindJavaPkg != "" && ctx.GOOS != "android" {
 		return fmt.Errorf("-javapkg is supported only for android target")
@@ -89,121 +93,96 @@ func runBind(cmd *command) error {
 		return fmt.Errorf("-prefix is supported only for ios target")
 	}
 
-	var pkg *build.Package
+	if ctx.GOOS == "android" {
+		if _, err := ndkRoot(); err != nil {
+			return err
+		}
+	}
+
+	if ctx.GOOS == "darwin" {
+		ctx.BuildTags = append(ctx.BuildTags, "ios")
+	}
+
+	var gobind string
+	if !buildN {
+		gobind, err = exec.LookPath("gobind")
+		if err != nil {
+			return errors.New("gobind was not found. Please run gomobile init before trying again.")
+		}
+	} else {
+		gobind = "gobind"
+	}
+
+	var pkgs []*build.Package
 	switch len(args) {
 	case 0:
-		pkg, err = ctx.ImportDir(cwd, build.ImportComment)
-	case 1:
-		pkg, err = ctx.Import(args[0], cwd, build.ImportComment)
+		pkgs = make([]*build.Package, 1)
+		pkgs[0], err = ctx.ImportDir(cwd, build.ImportComment)
 	default:
-		cmd.usage()
-		os.Exit(1)
+		pkgs, err = importPackages(args)
 	}
 	if err != nil {
 		return err
 	}
 
-	switch buildTarget {
+	// check if any of the package is main
+	for _, pkg := range pkgs {
+		if pkg.Name == "main" {
+			return fmt.Errorf("binding 'main' package (%s) is not supported", pkg.ImportComment)
+		}
+	}
+
+	switch targetOS {
 	case "android":
-		return goAndroidBind(pkg)
-	case "ios":
-		return goIOSBind(pkg)
+		return goAndroidBind(gobind, pkgs, targetArchs)
+	case "darwin":
+		if !xcodeAvailable() {
+			return fmt.Errorf("-target=ios requires XCode")
+		}
+		return goIOSBind(gobind, pkgs, targetArchs)
 	default:
-		return fmt.Errorf(`unknown -target, %q.`, buildTarget)
+		return fmt.Errorf(`invalid -target=%q`, buildTarget)
 	}
 }
 
+func importPackages(args []string) ([]*build.Package, error) {
+	pkgs := make([]*build.Package, len(args))
+	for i, a := range args {
+		a = path.Clean(a)
+		var err error
+		if pkgs[i], err = ctx.Import(a, cwd, build.ImportComment); err != nil {
+			return nil, fmt.Errorf("package %q: %v", a, err)
+		}
+	}
+	return pkgs, nil
+}
+
 var (
-	bindPrefix  string // -prefix
-	bindJavaPkg string // -javapkg
+	bindPrefix        string // -prefix
+	bindJavaPkg       string // -javapkg
+	bindClasspath     string // -classpath
+	bindBootClasspath string // -bootclasspath
 )
 
 func init() {
 	// bind command specific commands.
 	cmdBind.flag.StringVar(&bindJavaPkg, "javapkg", "",
-		"specifies custom Java package path used instead of the default 'go.<go package name>'. Valid only with -target=android.")
+		"specifies custom Java package path prefix. Valid only with -target=android.")
 	cmdBind.flag.StringVar(&bindPrefix, "prefix", "",
-		"custom Objective-C name prefix used instead of the default 'Go'. Valid only with -lang=ios.")
+		"custom Objective-C name prefix. Valid only with -target=ios.")
+	cmdBind.flag.StringVar(&bindClasspath, "classpath", "", "The classpath for imported Java classes. Valid only with -target=android.")
+	cmdBind.flag.StringVar(&bindBootClasspath, "bootclasspath", "", "The bootstrap classpath for imported Java classes. Valid only with -target=android.")
 }
 
-type binder struct {
-	files []*ast.File
-	fset  *token.FileSet
-	pkg   *types.Package
-}
-
-func (b *binder) GenObjc(outdir string) error {
-	const bindPrefixDefault = "Go"
-	if bindPrefix == "" {
-		bindPrefix = bindPrefixDefault
+func bootClasspath() (string, error) {
+	if bindBootClasspath != "" {
+		return bindBootClasspath, nil
 	}
-	name := strings.Title(b.pkg.Name())
-	bindOption := "-lang=objc"
-	if bindPrefix != bindPrefixDefault {
-		bindOption += " -prefix=" + bindPrefix
-	}
-
-	mfile := filepath.Join(outdir, bindPrefix+name+".m")
-	hfile := filepath.Join(outdir, bindPrefix+name+".h")
-
-	generate := func(w io.Writer) error {
-		if buildX {
-			printcmd("gobind %s -outdir=%s %s", bindOption, outdir, b.pkg.Path())
-		}
-		return bind.GenObjc(w, b.fset, b.pkg, bindPrefix, false)
-	}
-	if err := writeFile(mfile, generate); err != nil {
-		return err
-	}
-	generate = func(w io.Writer) error {
-		return bind.GenObjc(w, b.fset, b.pkg, bindPrefix, true)
-	}
-	if err := writeFile(hfile, generate); err != nil {
-		return err
-	}
-
-	objcPkg, err := ctx.Import("golang.org/x/mobile/bind/objc", "", build.FindOnly)
+	apiPath, err := androidAPIPath()
 	if err != nil {
-		return err
+		return "", err
 	}
-	return copyFile(filepath.Join(outdir, "seq.h"), filepath.Join(objcPkg.Dir, "seq.h"))
-}
-
-func (b *binder) GenJava(outdir string) error {
-	className := strings.Title(b.pkg.Name())
-	javaFile := filepath.Join(outdir, className+".java")
-	bindOption := "-lang=java"
-	if bindJavaPkg != "" {
-		bindOption += " -javapkg=" + bindJavaPkg
-	}
-
-	generate := func(w io.Writer) error {
-		if buildX {
-			printcmd("gobind %s -outdir=%s %s", bindOption, outdir, b.pkg.Path())
-		}
-		return bind.GenJava(w, b.fset, b.pkg, bindJavaPkg)
-	}
-	if err := writeFile(javaFile, generate); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (b *binder) GenGo(outdir string) error {
-	pkgName := "go_" + b.pkg.Name()
-	outdir = filepath.Join(outdir, pkgName)
-	goFile := filepath.Join(outdir, pkgName+"main.go")
-
-	generate := func(w io.Writer) error {
-		if buildX {
-			printcmd("gobind -lang=go -outdir=%s %s", outdir, b.pkg.Path())
-		}
-		return bind.GenGo(w, b.fset, b.pkg)
-	}
-	if err := writeFile(goFile, generate); err != nil {
-		return err
-	}
-	return nil
+	return filepath.Join(apiPath, "android.jar"), nil
 }
 
 func copyFile(dst, src string) error {
@@ -252,61 +231,4 @@ func writeFile(filename string, generate func(io.Writer) error) error {
 	}()
 
 	return generate(f)
-}
-
-func newBinder(bindPkg *build.Package) (*binder, error) {
-	if bindPkg.Name == "main" {
-		return nil, fmt.Errorf("package %q: can only bind a library package", bindPkg.Name)
-	}
-
-	fset := token.NewFileSet()
-
-	hasErr := false
-	var files []*ast.File
-	for _, filename := range bindPkg.GoFiles {
-		p := filepath.Join(bindPkg.Dir, filename)
-		file, err := parser.ParseFile(fset, p, nil, parser.AllErrors)
-		if err != nil {
-			hasErr = true
-			if list, _ := err.(scanner.ErrorList); len(list) > 0 {
-				for _, err := range list {
-					fmt.Fprintln(os.Stderr, err)
-				}
-			} else {
-				fmt.Fprintln(os.Stderr, err)
-			}
-		}
-		files = append(files, file)
-	}
-
-	if hasErr {
-		return nil, errors.New("package parsing failed.")
-	}
-
-	conf := loader.Config{
-		Fset:        fset,
-		AllowErrors: true,
-	}
-	conf.TypeChecker.IgnoreFuncBodies = true
-	conf.TypeChecker.FakeImportC = true
-	conf.TypeChecker.DisableUnusedImportCheck = true
-	var tcErrs []error
-	conf.TypeChecker.Error = func(err error) {
-		tcErrs = append(tcErrs, err)
-	}
-
-	conf.CreateFromFiles(bindPkg.ImportPath, files...)
-	program, err := conf.Load()
-	if err != nil {
-		for _, err := range tcErrs {
-			fmt.Fprintln(os.Stderr, err)
-		}
-		return nil, err
-	}
-	b := &binder{
-		files: files,
-		fset:  fset,
-		pkg:   program.Created[0].Pkg,
-	}
-	return b, nil
 }

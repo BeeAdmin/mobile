@@ -15,6 +15,8 @@
 #define LOG_INFO(...) __android_log_print(ANDROID_LOG_INFO, "Go", __VA_ARGS__)
 #define LOG_FATAL(...) __android_log_print(ANDROID_LOG_FATAL, "Go", __VA_ARGS__)
 
+static jclass current_class;
+
 static jclass find_class(JNIEnv *env, const char *class_name) {
 	jclass clazz = (*env)->FindClass(env, class_name);
 	if (clazz == NULL) {
@@ -35,7 +37,17 @@ static jmethodID find_method(JNIEnv *env, jclass clazz, const char *name, const 
 	return m;
 }
 
-jmethodID key_rune_method;
+static jmethodID find_static_method(JNIEnv *env, jclass clazz, const char *name, const char *sig) {
+	jmethodID m = (*env)->GetStaticMethodID(env, clazz, name, sig);
+	if (m == 0) {
+		(*env)->ExceptionClear(env);
+		LOG_FATAL("cannot find method %s %s", name, sig);
+		return 0;
+	}
+	return m;
+}
+
+static jmethodID key_rune_method;
 
 jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 	JNIEnv* env;
@@ -43,15 +55,10 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 		return -1;
 	}
 
-	// Load classes here, which uses the correct ClassLoader.
-	current_ctx_clazz = find_class(env, "org/golang/app/GoNativeActivity");
-	current_ctx_clazz = (jclass)(*env)->NewGlobalRef(env, current_ctx_clazz);
-	key_rune_method =  find_method(env, current_ctx_clazz, "getRune", "(III)I");
-
 	return JNI_VERSION_1_6;
 }
 
-int main_running = 0;
+static int main_running = 0;
 
 // Entry point from our subclassed NativeActivity.
 //
@@ -66,14 +73,15 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void* savedState, size_
 		JNIEnv* env = activity->env;
 
 		// Note that activity->clazz is mis-named.
-		current_vm = activity->vm;
-		current_ctx = activity->clazz;
+		current_class = (*env)->GetObjectClass(env, activity->clazz);
+		current_class = (*env)->NewGlobalRef(env, current_class);
+		key_rune_method = find_static_method(env, current_class, "getRune", "(III)I");
 
-		setCurrentContext(current_vm, (*env)->NewGlobalRef(env, current_ctx));
+		setCurrentContext(activity->vm, (*env)->NewGlobalRef(env, activity->clazz));
 
 		// Set TMPDIR.
-		jmethodID gettmpdir = find_method(env, current_ctx_clazz, "getTmpdir", "()Ljava/lang/String;");
-		jstring jpath = (jstring)(*env)->CallObjectMethod(env, current_ctx, gettmpdir, NULL);
+		jmethodID gettmpdir = find_method(env, current_class, "getTmpdir", "()Ljava/lang/String;");
+		jstring jpath = (jstring)(*env)->CallObjectMethod(env, activity->clazz, gettmpdir, NULL);
 		const char* tmpdir = (*env)->GetStringUTFChars(env, jpath, NULL);
 		if (setenv("TMPDIR", tmpdir, 1) != 0) {
 			LOG_INFO("setenv(\"TMPDIR\", \"%s\", 1) failed: %d", tmpdir, errno);
@@ -113,7 +121,7 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void* savedState, size_
 }
 
 // TODO(crawshaw): Test configuration on more devices.
-const EGLint RGB_888[] = {
+static const EGLint RGB_888[] = {
 	EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
 	EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
 	EGL_BLUE_SIZE, 8,
@@ -127,7 +135,7 @@ const EGLint RGB_888[] = {
 EGLDisplay display = NULL;
 EGLSurface surface = NULL;
 
-char* initEGLDisplay() {
+static char* initEGLDisplay() {
 	display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 	if (!eglInitialize(display, 0, 0)) {
 		return "EGL initialize failed";
@@ -181,9 +189,9 @@ char* destroyEGLSurface() {
 }
 
 int32_t getKeyRune(JNIEnv* env, AInputEvent* e) {
-	return (int32_t)(*env)->CallIntMethod(
+	return (int32_t)(*env)->CallStaticIntMethod(
 		env,
-		current_ctx,
+		current_class,
 		key_rune_method,
 		AInputEvent_getDeviceId(e),
 		AKeyEvent_getKeyCode(e),

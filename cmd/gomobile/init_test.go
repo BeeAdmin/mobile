@@ -8,8 +8,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"text/template"
@@ -24,13 +22,11 @@ func TestInit(t *testing.T) {
 		xout = os.Stderr
 		buildN = false
 		buildX = false
-		initU = false
 		os.Setenv("GOPATH", gopathorig)
 	}()
 	xout = buf
 	buildN = true
 	buildX = true
-	initU = true
 
 	// Test that first GOPATH element is chosen correctly.
 	gopath = "/GOPATH1"
@@ -76,7 +72,6 @@ func diffOutput(got string, wantTmpl *template.Template) (string, error) {
 }
 
 type outputData struct {
-	NDK       string
 	GOOS      string
 	GOARCH    string
 	GOPATH    string
@@ -85,20 +80,17 @@ type outputData struct {
 	Xproj     string
 	Xcontents string
 	Xinfo     infoplistTmplData
-	NumCPU    string
 }
 
 func defaultOutputData() outputData {
 	data := outputData{
-		NDK:       ndkVersion,
 		GOOS:      goos,
 		GOARCH:    goarch,
 		GOPATH:    gopath,
-		NDKARCH:   ndkarch,
+		NDKARCH:   archNDK(),
 		Xproj:     projPbxproj,
 		Xcontents: contentsJSON,
 		Xinfo:     infoplistTmplData{BundleID: "org.golang.todo.basic", Name: "Basic"},
-		NumCPU:    strconv.Itoa(runtime.NumCPU()),
 	}
 	if goos == "windows" {
 		data.EXE = ".exe"
@@ -107,35 +99,33 @@ func defaultOutputData() outputData {
 }
 
 var initTmpl = template.Must(template.New("output").Parse(`GOMOBILE={{.GOPATH}}/pkg/gomobile
-mkdir -p $GOMOBILE/android-{{.NDK}}
+rm -r -f "$GOMOBILE"
+mkdir -p $GOMOBILE
 WORK={{.GOPATH}}/pkg/gomobile/work
-mkdir -p $GOMOBILE/dl
-curl -o$GOMOBILE/dl/gomobile-{{.NDK}}-{{.GOOS}}-{{.NDKARCH}}.tar.gz https://dl.google.com/go/mobile/gomobile-{{.NDK}}-{{.GOOS}}-{{.NDKARCH}}.tar.gz
-tar xfz $GOMOBILE/dl/gomobile-{{.NDK}}-{{.GOOS}}-{{.NDKARCH}}.tar.gz
-mkdir -p $GOMOBILE/android-{{.NDK}}/arm/sysroot/usr
-mv $WORK/android-{{.NDK}}/platforms/android-15/arch-arm/usr/include $GOMOBILE/android-{{.NDK}}/arm/sysroot/usr/include
-mv $WORK/android-{{.NDK}}/platforms/android-15/arch-arm/usr/lib $GOMOBILE/android-{{.NDK}}/arm/sysroot/usr/lib
-mv $WORK/android-{{.NDK}}/toolchains/arm-linux-androideabi-4.8/prebuilt/{{.GOOS}}-{{.NDKARCH}}/bin $GOMOBILE/android-{{.NDK}}/arm/bin
-mv $WORK/android-{{.NDK}}/toolchains/arm-linux-androideabi-4.8/prebuilt/{{.GOOS}}-{{.NDKARCH}}/lib $GOMOBILE/android-{{.NDK}}/arm/lib
-mv $WORK/android-{{.NDK}}/toolchains/arm-linux-androideabi-4.8/prebuilt/{{.GOOS}}-{{.NDKARCH}}/libexec $GOMOBILE/android-{{.NDK}}/arm/libexec
-mkdir -p $GOMOBILE/android-{{.NDK}}/arm/arm-linux-androideabi/bin
-ln -s $GOMOBILE/android-{{.NDK}}/arm/bin/arm-linux-androideabi-ld{{.EXE}} $GOMOBILE/android-{{.NDK}}/arm/arm-linux-androideabi/bin/ld{{.EXE}}
-ln -s $GOMOBILE/android-{{.NDK}}/arm/bin/arm-linux-androideabi-as{{.EXE}} $GOMOBILE/android-{{.NDK}}/arm/arm-linux-androideabi/bin/as{{.EXE}}
-ln -s $GOMOBILE/android-{{.NDK}}/arm/bin/arm-linux-androideabi-gcc{{.EXE}} $GOMOBILE/android-{{.NDK}}/arm/arm-linux-androideabi/bin/gcc{{.EXE}}
-ln -s $GOMOBILE/android-{{.NDK}}/arm/bin/arm-linux-androideabi-g++{{.EXE}} $GOMOBILE/android-{{.NDK}}/arm/arm-linux-androideabi/bin/g++{{.EXE}}
-mkdir -p $GOMOBILE/dl
-curl -o$GOMOBILE/dl/gomobile-openal-soft-1.16.0.1.tar.gz https://dl.google.com/go/mobile/gomobile-openal-soft-1.16.0.1.tar.gz
-tar xfz $GOMOBILE/dl/gomobile-openal-soft-1.16.0.1.tar.gz
-mv $WORK/openal/include/AL $GOMOBILE/android-{{.NDK}}/arm/sysroot/usr/include/AL
-mkdir -p $GOMOBILE/android-{{.NDK}}/openal
-mv $WORK/openal/lib $GOMOBILE/android-{{.NDK}}/openal/lib{{if eq .GOOS "darwin"}}
-go install -p={{.NumCPU}} -x golang.org/x/mobile/gl
-go install -p={{.NumCPU}} -x golang.org/x/mobile/app
-go install -p={{.NumCPU}} -x golang.org/x/mobile/exp/app/debug{{end}}
-GOOS=android GOARCH=arm GOARM=7 CC=$GOMOBILE/android-{{.NDK}}/arm/bin/arm-linux-androideabi-gcc{{.EXE}} CXX=$GOMOBILE/android-{{.NDK}}/arm/bin/arm-linux-androideabi-g++{{.EXE}} CGO_ENABLED=1 go install -p={{.NumCPU}} -buildmode=c-shared -pkgdir=$GOMOBILE/pkg_android_arm -x std
-{{if eq .GOOS "darwin"}}GOOS=darwin GOARCH=arm GOARM=7 CC=clang-iphoneos CXX=clang-iphoneos CGO_CFLAGS=-isysroot=iphoneos -arch armv7 CGO_LDFLAGS=-isysroot=iphoneos -arch armv7 CGO_ENABLED=1 go install -p={{.NumCPU}} -pkgdir=$GOMOBILE/pkg_darwin_arm -x std
-GOOS=darwin GOARCH=arm64 CC=clang-iphoneos CXX=clang-iphoneos CGO_CFLAGS=-isysroot=iphoneos -arch arm64 CGO_LDFLAGS=-isysroot=iphoneos -arch arm64 CGO_ENABLED=1 go install -p={{.NumCPU}} -pkgdir=$GOMOBILE/pkg_darwin_arm64 -x std
-GOOS=darwin GOARCH=amd64 CC=clang-iphonesimulator CXX=clang-iphonesimulator CGO_CFLAGS=-isysroot=iphonesimulator -mios-simulator-version-min=6.1 -arch x86_64 CGO_LDFLAGS=-isysroot=iphonesimulator -mios-simulator-version-min=6.1 -arch x86_64 CGO_ENABLED=1 go install -p={{.NumCPU}} -tags=ios -pkgdir=$GOMOBILE/pkg_darwin_amd64 -x std
-{{end}}go version > $GOMOBILE/version
+go install -x golang.org/x/mobile/cmd/gobind
+cp $OPENAL_PATH/include/AL/al.h $GOMOBILE/include/AL/al.h
+mkdir -p $GOMOBILE/include/AL
+cp $OPENAL_PATH/include/AL/alc.h $GOMOBILE/include/AL/alc.h
+mkdir -p $GOMOBILE/include/AL
+mkdir -p $WORK/build/armeabi
+PWD=$WORK/build/armeabi cmake $OPENAL_PATH -DCMAKE_TOOLCHAIN_FILE=$OPENAL_PATH/XCompile-Android.txt -DHOST=armv7a-linux-androideabi16
+PWD=$WORK/build/armeabi $NDK_PATH/prebuilt/{{.NDKARCH}}/bin/make
+cp $WORK/build/armeabi/libopenal.so $GOMOBILE/lib/armeabi-v7a/libopenal.so
+mkdir -p $GOMOBILE/lib/armeabi-v7a
+mkdir -p $WORK/build/arm64
+PWD=$WORK/build/arm64 cmake $OPENAL_PATH -DCMAKE_TOOLCHAIN_FILE=$OPENAL_PATH/XCompile-Android.txt -DHOST=aarch64-linux-android21
+PWD=$WORK/build/arm64 $NDK_PATH/prebuilt/{{.NDKARCH}}/bin/make
+cp $WORK/build/arm64/libopenal.so $GOMOBILE/lib/arm64-v8a/libopenal.so
+mkdir -p $GOMOBILE/lib/arm64-v8a
+mkdir -p $WORK/build/x86
+PWD=$WORK/build/x86 cmake $OPENAL_PATH -DCMAKE_TOOLCHAIN_FILE=$OPENAL_PATH/XCompile-Android.txt -DHOST=i686-linux-android16
+PWD=$WORK/build/x86 $NDK_PATH/prebuilt/{{.NDKARCH}}/bin/make
+cp $WORK/build/x86/libopenal.so $GOMOBILE/lib/x86/libopenal.so
+mkdir -p $GOMOBILE/lib/x86
+mkdir -p $WORK/build/x86_64
+PWD=$WORK/build/x86_64 cmake $OPENAL_PATH -DCMAKE_TOOLCHAIN_FILE=$OPENAL_PATH/XCompile-Android.txt -DHOST=x86_64-linux-android21
+PWD=$WORK/build/x86_64 $NDK_PATH/prebuilt/{{.NDKARCH}}/bin/make
+cp $WORK/build/x86_64/libopenal.so $GOMOBILE/lib/x86_64/libopenal.so
+mkdir -p $GOMOBILE/lib/x86_64
 rm -r -f "$WORK"
 `))

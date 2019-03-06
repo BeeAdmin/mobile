@@ -8,31 +8,109 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"golang.org/x/mobile/internal/importers/java"
 )
 
-// TestJavaSeqTest runs java test SeqTest.java.
+var gomobileBin string
+
+func TestMain(m *testing.M) {
+	os.Exit(testMain(m))
+}
+
+func testMain(m *testing.M) int {
+	// Build gomobile and gobind and put them into PATH.
+	binDir, err := ioutil.TempDir("", "bind-java-test-")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(binDir)
+	exe := ""
+	if runtime.GOOS == "windows" {
+		exe = ".exe"
+	}
+	if runtime.GOOS != "android" {
+		gomobileBin = filepath.Join(binDir, "gomobile"+exe)
+		gobindBin := filepath.Join(binDir, "gobind"+exe)
+		if out, err := exec.Command("go", "build", "-o", gomobileBin, "golang.org/x/mobile/cmd/gomobile").CombinedOutput(); err != nil {
+			log.Fatalf("gomobile build failed: %v: %s", err, out)
+		}
+		if out, err := exec.Command("go", "build", "-o", gobindBin, "golang.org/x/mobile/cmd/gobind").CombinedOutput(); err != nil {
+			log.Fatalf("gobind build failed: %v: %s", err, out)
+		}
+		PATH := os.Getenv("PATH")
+		if PATH != "" {
+			PATH += string(filepath.ListSeparator)
+		}
+		PATH += binDir
+		os.Setenv("PATH", PATH)
+	}
+	return m.Run()
+}
+
+func TestClasses(t *testing.T) {
+	if !java.IsAvailable() {
+		t.Skipf("java importer is not available")
+	}
+	runTest(t, []string{
+		"golang.org/x/mobile/bind/testdata/testpkg/javapkg",
+	}, "", "ClassesTest")
+}
+
+func TestCustomPkg(t *testing.T) {
+	runTest(t, []string{
+		"golang.org/x/mobile/bind/testdata/testpkg",
+	}, "org.golang.custompkg", "CustomPkgTest")
+}
+
+func TestJavaSeqTest(t *testing.T) {
+	runTest(t, []string{
+		"golang.org/x/mobile/bind/testdata/testpkg",
+		"golang.org/x/mobile/bind/testdata/testpkg/secondpkg",
+		"golang.org/x/mobile/bind/testdata/testpkg/simplepkg",
+	}, "", "SeqTest")
+}
+
+// TestJavaSeqBench runs java test SeqBench.java, with the same
+// environment requirements as TestJavaSeqTest.
+//
+// The benchmarks runs on the phone, so the benchmarkpkg implements
+// rudimentary timing logic and outputs benchcmp compatible runtimes
+// to logcat. Use
+//
+// adb logcat -v raw GoLog:* *:S
+//
+// while running the benchmark to see the results.
+func TestJavaSeqBench(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping benchmark in short mode.")
+	}
+	runTest(t, []string{"golang.org/x/mobile/bind/testdata/benchmark"}, "", "SeqBench")
+}
+
+// runTest runs the Android java test class specified with javaCls. If javaPkg is
+// set, it is passed with the -javapkg flag to gomobile. The pkgNames lists the Go
+// packages to bind for the test.
 // This requires the gradle command in PATH and
 // the Android SDK whose path is available through ANDROID_HOME environment variable.
-func TestJavaSeqTest(t *testing.T) {
-	if _, err := run("which gradle"); err != nil {
+func runTest(t *testing.T, pkgNames []string, javaPkg, javaCls string) {
+	if gomobileBin == "" {
+		t.Skipf("no gomobile on %s", runtime.GOOS)
+	}
+	gradle, err := exec.LookPath("gradle")
+	if err != nil {
 		t.Skip("command gradle not found, skipping")
 	}
 	if sdk := os.Getenv("ANDROID_HOME"); sdk == "" {
 		t.Skip("ANDROID_HOME environment var not set, skipping")
 	}
-	if _, err := run("which gomobile"); err != nil {
-		_, err := run("go install golang.org/x/mobile/cmd/gomobile")
-		if err != nil {
-			t.Skip("gomobile not available, skipping")
-		}
-	}
-
-	// TODO(hyangah): gomobile init if necessary.
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -50,27 +128,32 @@ func TestJavaSeqTest(t *testing.T) {
 	}
 	defer os.Chdir(cwd)
 
-	for _, d := range []string{"src/main", "src/androidTest/java/go", "libs"} {
+	for _, d := range []string{"src/main", "src/androidTest/java/go", "libs", "src/main/res/values"} {
 		err = os.MkdirAll(filepath.Join(tmpdir, d), 0700)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	buf, err := run("gomobile bind golang.org/x/mobile/bind/java/testpkg")
+	args := []string{"bind", "-tags", "aaa bbb", "-o", "pkg.aar"}
+	if javaPkg != "" {
+		args = append(args, "-javapkg", javaPkg)
+	}
+	args = append(args, pkgNames...)
+	buf, err := exec.Command(gomobileBin, args...).CombinedOutput()
 	if err != nil {
 		t.Logf("%s", buf)
 		t.Fatalf("failed to run gomobile bind: %v", err)
 	}
 
-	fname := filepath.Join(tmpdir, "libs", "testpkg.aar")
-	err = cp(fname, filepath.Join(tmpdir, "testpkg.aar"))
+	fname := filepath.Join(tmpdir, "libs", "pkg.aar")
+	err = cp(fname, filepath.Join(tmpdir, "pkg.aar"))
 	if err != nil {
-		t.Fatalf("failed to copy testpkg.aar: %v", err)
+		t.Fatalf("failed to copy pkg.aar: %v", err)
 	}
 
-	fname = filepath.Join(tmpdir, "src/androidTest/java/go/SeqTest.java")
-	err = cp(fname, filepath.Join(cwd, "SeqTest.java"))
+	fname = filepath.Join(tmpdir, "src/androidTest/java/go/"+javaCls+".java")
+	err = cp(fname, filepath.Join(cwd, javaCls+".java"))
 	if err != nil {
 		t.Fatalf("failed to copy SeqTest.java: %v", err)
 	}
@@ -81,13 +164,20 @@ func TestJavaSeqTest(t *testing.T) {
 		t.Fatalf("failed to write android manifest file: %v", err)
 	}
 
+	// Add a dummy string resource to avoid errors from the Android build system.
+	fname = filepath.Join(tmpdir, "src/main/res/values/strings.xml")
+	err = ioutil.WriteFile(fname, []byte(stringsxml), 0700)
+	if err != nil {
+		t.Fatalf("failed to write strings.xml file: %v", err)
+	}
+
 	fname = filepath.Join(tmpdir, "build.gradle")
 	err = ioutil.WriteFile(fname, []byte(buildgradle), 0700)
 	if err != nil {
 		t.Fatalf("failed to write build.gradle file: %v", err)
 	}
 
-	if buf, err := run("gradle connectedAndroidTest"); err != nil {
+	if buf, err := run(gradle + " connectedAndroidTest"); err != nil {
 		t.Logf("%s", buf)
 		t.Errorf("failed to run gradle test: %v", err)
 	}
@@ -125,30 +215,38 @@ const androidmanifest = `<?xml version="1.0" encoding="utf-8"?>
 
 const buildgradle = `buildscript {
     repositories {
+        google()
         jcenter()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:1.1.3'
+        classpath 'com.android.tools.build:gradle:3.1.0'
     }
 }
 
 allprojects {
-    repositories { jcenter() }
+    repositories {
+		google()
+		jcenter()
+	}
 }
 
 apply plugin: 'com.android.library'
 
 android {
     compileSdkVersion 'android-19'
-    buildToolsVersion '21.1.2'
-    defaultConfig { minSdkVersion 15 }
+    defaultConfig { minSdkVersion 16 }
 }
 
 repositories {
     flatDir { dirs 'libs' }
 }
+
 dependencies {
-    compile 'com.android.support:appcompat-v7:19.0.0'
-    compile(name: "testpkg", ext: "aar")
+    implementation(name: "pkg", ext: "aar")
 }
 `
+
+const stringsxml = `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="dummy">dummy</string>
+</resources>`

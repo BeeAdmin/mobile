@@ -7,13 +7,28 @@ package main
 import (
 	"bytes"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"text/template"
 )
 
-// TODO(crawshaw): TestBindIOS
+func TestImportPackagesPathCleaning(t *testing.T) {
+	if runtime.GOOS == "android" {
+		t.Skip("not available on Android")
+	}
+	slashPath := "golang.org/x/mobile/example/bind/hello/"
+	pkgs, err := importPackages([]string{slashPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := pkgs[0]
+	if c := path.Clean(slashPath); p.ImportPath != c {
+		t.Errorf("expected %s; got %s", c, p.ImportPath)
+	}
+}
 
 func TestBindAndroid(t *testing.T) {
 	androidHome := os.Getenv("ANDROID_HOME")
@@ -32,25 +47,21 @@ func TestBindAndroid(t *testing.T) {
 		buildX = false
 		buildO = ""
 		buildTarget = ""
+		bindJavaPkg = ""
 	}()
 	buildN = true
 	buildX = true
 	buildO = "asset.aar"
-	buildTarget = "android"
+	buildTarget = "android/arm"
 
 	tests := []struct {
-		javaPkg    string
-		wantGobind string
-		wantPkgDir string
+		javaPkg string
 	}{
 		{
-			wantGobind: "gobind -lang=java",
-			wantPkgDir: "go/asset",
+			// Empty javaPkg
 		},
 		{
-			javaPkg:    "com.example.foo",
-			wantGobind: "gobind -lang=java -javapkg=com.example.foo",
-			wantPkgDir: "com/example/foo",
+			javaPkg: "com.example.foo",
 		},
 	}
 	for _, tc := range tests {
@@ -58,7 +69,7 @@ func TestBindAndroid(t *testing.T) {
 
 		buf := new(bytes.Buffer)
 		xout = buf
-		gopath = filepath.SplitList(os.Getenv("GOPATH"))[0]
+		gopath = filepath.SplitList(goEnv("GOPATH"))[0]
 		if goos == "windows" {
 			os.Setenv("HOMEDRIVE", "C:")
 		}
@@ -73,13 +84,11 @@ func TestBindAndroid(t *testing.T) {
 		data := struct {
 			outputData
 			AndroidPlatform string
-			GobindJavaCmd   string
-			JavaPkgDir      string
+			JavaPkg         string
 		}{
 			outputData:      defaultOutputData(),
 			AndroidPlatform: platform,
-			GobindJavaCmd:   tc.wantGobind,
-			JavaPkgDir:      tc.wantPkgDir,
+			JavaPkg:         tc.javaPkg,
 		}
 
 		wantBuf := new(bytes.Buffer)
@@ -99,17 +108,103 @@ func TestBindAndroid(t *testing.T) {
 	}
 }
 
+func TestBindIOS(t *testing.T) {
+	if !xcodeAvailable() {
+		t.Skip("Xcode is missing")
+	}
+	defer func() {
+		xout = os.Stderr
+		buildN = false
+		buildX = false
+		buildO = ""
+		buildTarget = ""
+		bindPrefix = ""
+	}()
+	buildN = true
+	buildX = true
+	buildO = "Asset.framework"
+	buildTarget = "ios/arm"
+
+	tests := []struct {
+		prefix string
+	}{
+		{
+			// empty prefix
+		},
+		{
+			prefix: "Foo",
+		},
+	}
+	for _, tc := range tests {
+		bindPrefix = tc.prefix
+
+		buf := new(bytes.Buffer)
+		xout = buf
+		gopath = filepath.SplitList(goEnv("GOPATH"))[0]
+		if goos == "windows" {
+			os.Setenv("HOMEDRIVE", "C:")
+		}
+		cmdBind.flag.Parse([]string{"golang.org/x/mobile/asset"})
+		err := runBind(cmdBind)
+		if err != nil {
+			t.Log(buf.String())
+			t.Fatal(err)
+		}
+		got := filepath.ToSlash(buf.String())
+
+		data := struct {
+			outputData
+			Prefix string
+		}{
+			outputData: defaultOutputData(),
+			Prefix:     tc.prefix,
+		}
+
+		wantBuf := new(bytes.Buffer)
+		if err := bindIOSTmpl.Execute(wantBuf, data); err != nil {
+			t.Errorf("%+v: computing diff failed: %v", tc, err)
+			continue
+		}
+
+		diff, err := diff(got, wantBuf.String())
+		if err != nil {
+			t.Errorf("%+v: computing diff failed: %v", tc, err)
+			continue
+		}
+		if diff != "" {
+			t.Errorf("%+v: unexpected output:\n%s", tc, diff)
+		}
+	}
+}
+
 var bindAndroidTmpl = template.Must(template.New("output").Parse(`GOMOBILE={{.GOPATH}}/pkg/gomobile
 WORK=$WORK
-mkdir -p $WORK/go_asset
-gobind -lang=go -outdir=$WORK/go_asset golang.org/x/mobile/asset
-mkdir -p $WORK/androidlib
-GOOS=android GOARCH=arm GOARM=7 CC=$GOMOBILE/android-{{.NDK}}/arm/bin/arm-linux-androideabi-gcc{{.EXE}} CXX=$GOMOBILE/android-{{.NDK}}/arm/bin/arm-linux-androideabi-g++{{.EXE}} CGO_ENABLED=1 go build -p={{.NumCPU}} -pkgdir=$GOMOBILE/pkg_android_arm -tags="" -x -buildmode=c-shared -o=$WORK/android/src/main/jniLibs/armeabi-v7a/libgojni.so $WORK/androidlib/main.go
-mkdir -p $WORK/android/src/main/java/{{.JavaPkgDir}}
-{{.GobindJavaCmd}} -outdir=$WORK/android/src/main/java/{{.JavaPkgDir}} golang.org/x/mobile/asset
-mkdir -p $WORK/android/src/main/java/go
-rm $WORK/android/src/main/java/go/Seq.java
-ln -s $GOPATH/src/golang.org/x/mobile/bind/java/Seq.java $WORK/android/src/main/java/go/Seq.java
-PWD=$WORK/android/src/main/java javac -d $WORK/javac-output -source 1.7 -target 1.7 -bootclasspath {{.AndroidPlatform}}/android.jar *.java
+GOOS=android CGO_ENABLED=1 gobind -lang=go,java -outdir=$WORK{{if .JavaPkg}} -javapkg={{.JavaPkg}}{{end}} golang.org/x/mobile/asset
+GOOS=android GOARCH=arm CC=$NDK_PATH/toolchains/llvm/prebuilt/{{.NDKARCH}}/bin/armv7a-linux-androideabi16-clang CXX=$NDK_PATH/toolchains/llvm/prebuilt/{{.NDKARCH}}/bin/armv7a-linux-androideabi16-clang++ CGO_ENABLED=1 GOARM=7 GOPATH=$WORK:$GOPATH go build -x -buildmode=c-shared -o=$WORK/android/src/main/jniLibs/armeabi-v7a/libgojni.so gobind
+PWD=$WORK/java javac -d $WORK/javac-output -source 1.7 -target 1.7 -bootclasspath {{.AndroidPlatform}}/android.jar *.java
 jar c -C $WORK/javac-output .
+`))
+
+var bindIOSTmpl = template.Must(template.New("output").Parse(`GOMOBILE={{.GOPATH}}/pkg/gomobile
+WORK=$WORK
+GOOS=darwin CGO_ENABLED=1 gobind -lang=go,objc -outdir=$WORK -tags=ios{{if .Prefix}} -prefix={{.Prefix}}{{end}} golang.org/x/mobile/asset
+GOARM=7 GOOS=darwin GOARCH=arm CC=iphoneos-clang CXX=iphoneos-clang++ CGO_CFLAGS=-isysroot=iphoneos -miphoneos-version-min=7.0 -arch armv7 CGO_CXXFLAGS=-isysroot=iphoneos -miphoneos-version-min=7.0 -arch armv7 CGO_LDFLAGS=-isysroot=iphoneos -miphoneos-version-min=7.0 -arch armv7 CGO_ENABLED=1 GOPATH=$WORK:$GOPATH go build -tags ios -x -buildmode=c-archive -o $WORK/asset-arm.a gobind
+rm -r -f "Asset.framework"
+mkdir -p Asset.framework/Versions/A/Headers
+ln -s A Asset.framework/Versions/Current
+ln -s Versions/Current/Headers Asset.framework/Headers
+ln -s Versions/Current/Asset Asset.framework/Asset
+xcrun lipo -create -arch armv7 $WORK/asset-arm.a -o Asset.framework/Versions/A/Asset
+cp $WORK/src/gobind/{{.Prefix}}Asset.objc.h Asset.framework/Versions/A/Headers/{{.Prefix}}Asset.objc.h
+mkdir -p Asset.framework/Versions/A/Headers
+cp $WORK/src/gobind/Universe.objc.h Asset.framework/Versions/A/Headers/Universe.objc.h
+mkdir -p Asset.framework/Versions/A/Headers
+cp $WORK/src/gobind/ref.h Asset.framework/Versions/A/Headers/ref.h
+mkdir -p Asset.framework/Versions/A/Headers
+mkdir -p Asset.framework/Versions/A/Headers
+mkdir -p Asset.framework/Versions/A/Resources
+ln -s Versions/Current/Resources Asset.framework/Resources
+mkdir -p Asset.framework/Resources
+mkdir -p Asset.framework/Versions/A/Modules
+ln -s Versions/Current/Modules Asset.framework/Modules
 `))

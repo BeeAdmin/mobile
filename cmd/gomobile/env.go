@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,16 +16,15 @@ import (
 var (
 	cwd          string
 	gomobilepath string // $GOPATH/pkg/gomobile
-	ndkccpath    string // $GOPATH/pkg/gomobile/android-{{.NDK}}
 
-	androidArmEnv  []string
-	darwinArmEnv   []string
-	darwinArm64Env []string
-	darwin386Env   []string
-	darwinAmd64Env []string
+	androidEnv map[string][]string // android arch -> []string
+
+	darwinEnv map[string][]string
 
 	androidArmNM string
 	darwinArmNM  string
+
+	allArchs = []string{"arm", "arm64", "386", "amd64"}
 )
 
 func buildEnvInit() (cleanup func(), err error) {
@@ -38,20 +37,12 @@ func buildEnvInit() (cleanup func(), err error) {
 		}
 	}
 
-	if err := envInit(); err != nil {
-		return nil, err
-	}
-
 	if buildX {
 		fmt.Fprintln(xout, "GOMOBILE="+gomobilepath)
 	}
 
 	// Check the toolchain is in a good state.
 	// Pick a temporary directory for assembling an apk/app.
-	version, err := goVersion()
-	if err != nil {
-		return nil, err
-	}
 	if gomobilepath == "" {
 		return nil, errors.New("toolchain not installed, run `gomobile init`")
 	}
@@ -67,15 +58,6 @@ func buildEnvInit() (cleanup func(), err error) {
 		tmpdir = "$WORK"
 		cleanupFn = func() {}
 	} else {
-		verpath := filepath.Join(gomobilepath, "version")
-		installedVersion, err := ioutil.ReadFile(verpath)
-		if err != nil {
-			return nil, errors.New("toolchain partially installed, run `gomobile init`")
-		}
-		if !bytes.Equal(installedVersion, version) {
-			return nil, errors.New("toolchain out of date, run `gomobile init`")
-		}
-
 		tmpdir, err = ioutil.TempDir("", "gomobile-work-")
 		if err != nil {
 			return nil, err
@@ -83,6 +65,10 @@ func buildEnvInit() (cleanup func(), err error) {
 	}
 	if buildX {
 		fmt.Fprintln(xout, "WORK="+tmpdir)
+	}
+
+	if err := envInit(); err != nil {
+		return nil, err
 	}
 
 	return cleanupFn, nil
@@ -96,83 +82,88 @@ func envInit() (err error) {
 	}
 
 	// Setup the cross-compiler environments.
-
-	// TODO(crawshaw): Remove ndkccpath global.
-	ndkccpath = filepath.Join(gomobilepath, "android-"+ndkVersion)
-	ndkccbin := filepath.Join(ndkccpath, "arm", "bin")
-
-	exe := ""
-	if goos == "windows" {
-		exe = ".exe"
+	if ndkRoot, err := ndkRoot(); err == nil {
+		androidEnv = make(map[string][]string)
+		for arch, toolchain := range ndk {
+			androidEnv[arch] = []string{
+				"GOOS=android",
+				"GOARCH=" + arch,
+				"CC=" + toolchain.Path(ndkRoot, "clang"),
+				"CXX=" + toolchain.Path(ndkRoot, "clang++"),
+				"CGO_ENABLED=1",
+			}
+			if arch == "arm" {
+				androidEnv[arch] = append(androidEnv[arch], "GOARM=7")
+			}
+		}
 	}
-	androidArmEnv = []string{
-		"GOOS=android",
-		"GOARCH=arm",
-		"GOARM=7",
-		"CC=" + filepath.Join(ndkccbin, "arm-linux-androideabi-gcc"+exe),
-		"CXX=" + filepath.Join(ndkccbin, "arm-linux-androideabi-g++"+exe),
-		"CGO_ENABLED=1",
-	}
-	androidArmNM = filepath.Join(ndkccbin, "arm-linux-androideabi-nm"+exe)
 
-	if runtime.GOOS != "darwin" {
+	if !xcodeAvailable() {
 		return nil
 	}
 
-	clang, cflags, err := envClang("iphoneos")
-	if err != nil {
-		return err
-	}
-	darwinArmEnv = []string{
-		"GOOS=darwin",
-		"GOARCH=arm",
-		"GOARM=7",
-		"CC=" + clang,
-		"CXX=" + clang,
-		"CGO_CFLAGS=" + cflags + " -arch " + archClang("arm"),
-		"CGO_LDFLAGS=" + cflags + " -arch " + archClang("arm"),
-		"CGO_ENABLED=1",
-	}
 	darwinArmNM = "nm"
-	darwinArm64Env = []string{
-		"GOOS=darwin",
-		"GOARCH=arm64",
-		"CC=" + clang,
-		"CXX=" + clang,
-		"CGO_CFLAGS=" + cflags + " -arch " + archClang("arm64"),
-		"CGO_LDFLAGS=" + cflags + " -arch " + archClang("arm64"),
-		"CGO_ENABLED=1",
-	}
-
-	clang, cflags, err = envClang("iphonesimulator")
-	if err != nil {
-		return err
-	}
-	darwin386Env = []string{
-		"GOOS=darwin",
-		"GOARCH=386",
-		"CC=" + clang,
-		"CXX=" + clang,
-		"CGO_CFLAGS=" + cflags + " -mios-simulator-version-min=6.1 -arch " + archClang("386"),
-		"CGO_LDFLAGS=" + cflags + " -mios-simulator-version-min=6.1 -arch " + archClang("386"),
-		"CGO_ENABLED=1",
-	}
-	darwinAmd64Env = []string{
-		"GOOS=darwin",
-		"GOARCH=amd64",
-		"CC=" + clang,
-		"CXX=" + clang,
-		"CGO_CFLAGS=" + cflags + " -mios-simulator-version-min=6.1 -arch x86_64",
-		"CGO_LDFLAGS=" + cflags + " -mios-simulator-version-min=6.1 -arch x86_64",
-		"CGO_ENABLED=1",
+	darwinEnv = make(map[string][]string)
+	for _, arch := range allArchs {
+		var env []string
+		var err error
+		var clang, cflags string
+		switch arch {
+		case "arm":
+			env = append(env, "GOARM=7")
+			fallthrough
+		case "arm64":
+			clang, cflags, err = envClang("iphoneos")
+			cflags += " -miphoneos-version-min=" + buildIOSVersion
+		case "386", "amd64":
+			clang, cflags, err = envClang("iphonesimulator")
+			cflags += " -mios-simulator-version-min=" + buildIOSVersion
+		default:
+			panic(fmt.Errorf("unknown GOARCH: %q", arch))
+		}
+		if err != nil {
+			return err
+		}
+		env = append(env,
+			"GOOS=darwin",
+			"GOARCH="+arch,
+			"CC="+clang,
+			"CXX="+clang+"++",
+			"CGO_CFLAGS="+cflags+" -arch "+archClang(arch),
+			"CGO_CXXFLAGS="+cflags+" -arch "+archClang(arch),
+			"CGO_LDFLAGS="+cflags+" -arch "+archClang(arch),
+			"CGO_ENABLED=1",
+		)
+		darwinEnv[arch] = env
 	}
 
 	return nil
 }
 
+func ndkRoot() (string, error) {
+	if buildN {
+		return "$NDK_PATH", nil
+	}
+	androidHome := os.Getenv("ANDROID_HOME")
+	if androidHome == "" {
+		return "", errors.New("The Android SDK was not found. Please set ANDROID_HOME to the root of the Android SDK.")
+	}
+	ndkRoot := filepath.Join(androidHome, "ndk-bundle")
+	_, err := os.Stat(ndkRoot)
+	if err != nil {
+		return "", fmt.Errorf("The NDK was not found in $ANDROID_HOME/ndk-bundle (%q). Install the NDK with `sdkmanager 'ndk-bundle'`", ndkRoot)
+	}
+	prebuiltPath := filepath.Join(androidHome, "ndk-bundle", "toolchains", "llvm", "prebuilt")
+	_, err = os.Stat(prebuiltPath)
+	if err != nil {
+		return "", fmt.Errorf("No prebuilt toolchains found in $ANDROID_HOME/ndk-bundle/toolchains/llvm/prebuilt (%q). Make sure your NDK version is >= r19b. Use `sdkmanager --update` to update it.", prebuiltPath)
+	}
+	return ndkRoot, nil
+}
+
 func envClang(sdkName string) (clang, cflags string, err error) {
 	if buildN {
-		return "clang-" + sdkName, "-isysroot=" + sdkName, nil
+		return sdkName + "-clang", "-isysroot=" + sdkName, nil
 	}
 	cmd := exec.Command("xcrun", "--sdk", sdkName, "--find", "clang")
 	out, err := cmd.CombinedOutput()
@@ -187,7 +178,6 @@ func envClang(sdkName string) (clang, cflags string, err error) {
 		return "", "", fmt.Errorf("xcrun --show-sdk-path: %v\n%s", err, out)
 	}
 	sdk := strings.TrimSpace(string(out))
-
 	return clang, "-isysroot " + sdk, nil
 }
 
@@ -252,6 +242,108 @@ func getenv(env []string, key string) string {
 	return ""
 }
 
-func pkgdir(env []string) string {
-	return gomobilepath + "/pkg_" + getenv(env, "GOOS") + "_" + getenv(env, "GOARCH")
+func archNDK() string {
+	if runtime.GOOS == "windows" && runtime.GOARCH == "386" {
+		return "windows"
+	} else {
+		var arch string
+		switch runtime.GOARCH {
+		case "386":
+			arch = "x86"
+		case "amd64":
+			arch = "x86_64"
+		default:
+			panic("unsupported GOARCH: " + runtime.GOARCH)
+		}
+		return runtime.GOOS + "-" + arch
+	}
+}
+
+type ndkToolchain struct {
+	arch        string
+	abi         string
+	toolPrefix  string
+	clangPrefix string
+}
+
+func (tc *ndkToolchain) Path(ndkRoot, toolName string) string {
+	var pref string
+	switch toolName {
+	case "clang", "clang++":
+		if runtime.GOOS == "windows" {
+			return tc.createNDKr19bWorkaroundTool(ndkRoot, toolName)
+		}
+		pref = tc.clangPrefix
+	default:
+		pref = tc.toolPrefix
+	}
+	return filepath.Join(ndkRoot, "toolchains", "llvm", "prebuilt", archNDK(), "bin", pref+"-"+toolName)
+}
+
+// createNDKr19bWorkaroundTool creates a Windows wrapper script for clang or clang++.
+// The scripts included in r19b are broken on Windows: https://github.com/android-ndk/ndk/issues/920.
+// TODO: Remove this when r19c is out; the code inside is hacky and panicky.
+func (tc *ndkToolchain) createNDKr19bWorkaroundTool(ndkRoot, toolName string) string {
+	toolCmd := filepath.Join(tmpdir, fmt.Sprintf("%s-%s.cmd", tc.arch, toolName))
+	tool, err := os.Create(toolCmd)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := tool.Close(); err != nil {
+			log.Fatal(err)
+		}
+	}()
+	tcBin := filepath.Join(ndkRoot, "toolchains", "llvm", "prebuilt", archNDK(), "bin")
+	// Adapted from the NDK cmd wrappers.
+	toolCmdContent := fmt.Sprintf(`@echo off
+set _BIN_DIR=%s\
+%%_BIN_DIR%%%s.exe --target=%s -fno-addrsig %%*"`, tcBin, toolName, tc.clangPrefix)
+	if _, err = tool.Write([]byte(toolCmdContent)); err != nil {
+		log.Fatal(err)
+	}
+	return toolCmd
+}
+
+type ndkConfig map[string]ndkToolchain // map: GOOS->androidConfig.
+
+func (nc ndkConfig) Toolchain(arch string) ndkToolchain {
+	tc, ok := nc[arch]
+	if !ok {
+		panic(`unsupported architecture: ` + arch)
+	}
+	return tc
+}
+
+var ndk = ndkConfig{
+	"arm": {
+		arch:        "arm",
+		abi:         "armeabi-v7a",
+		toolPrefix:  "arm-linux-androideabi",
+		clangPrefix: "armv7a-linux-androideabi16",
+	},
+	"arm64": {
+		arch:        "arm64",
+		abi:         "arm64-v8a",
+		toolPrefix:  "aarch64-linux-android",
+		clangPrefix: "aarch64-linux-android21",
+	},
+
+	"386": {
+		arch:        "x86",
+		abi:         "x86",
+		toolPrefix:  "i686-linux-android",
+		clangPrefix: "i686-linux-android16",
+	},
+	"amd64": {
+		arch:        "x86_64",
+		abi:         "x86_64",
+		toolPrefix:  "x86_64-linux-android",
+		clangPrefix: "x86_64-linux-android21",
+	},
+}
+
+func xcodeAvailable() bool {
+	err := exec.Command("xcrun", "xcodebuild", "-version").Run()
+	return err == nil
 }

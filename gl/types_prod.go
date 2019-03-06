@@ -2,13 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build linux darwin
+// +build linux darwin windows openbsd
 // +build !gldebug
 
 package gl
 
-// #include "work.h"
-import "C"
 import "fmt"
 
 // Enum is equivalent to GLenum, and is normally used with one of the
@@ -25,6 +23,9 @@ type Attrib struct {
 
 // Program identifies a compiled shader program.
 type Program struct {
+	// Init is set by CreateProgram, as some GL drivers (in particular,
+	// ANGLE) return true for glIsProgram(0).
+	Init  bool
 	Value uint32
 }
 
@@ -58,15 +59,28 @@ type Uniform struct {
 	Value int32
 }
 
-func (v Attrib) c() C.uintptr_t       { return C.uintptr_t(v.Value) }
-func (v Enum) c() C.uintptr_t         { return C.uintptr_t(v) }
-func (v Program) c() C.uintptr_t      { return C.uintptr_t(v.Value) }
-func (v Shader) c() C.uintptr_t       { return C.uintptr_t(v.Value) }
-func (v Buffer) c() C.uintptr_t       { return C.uintptr_t(v.Value) }
-func (v Framebuffer) c() C.uintptr_t  { return C.uintptr_t(v.Value) }
-func (v Renderbuffer) c() C.uintptr_t { return C.uintptr_t(v.Value) }
-func (v Texture) c() C.uintptr_t      { return C.uintptr_t(v.Value) }
-func (v Uniform) c() C.uintptr_t      { return C.uintptr_t(v.Value) }
+// A VertexArray is a GL object that holds vertices in an internal format.
+type VertexArray struct {
+	Value uint32
+}
+
+func (v Attrib) c() uintptr { return uintptr(v.Value) }
+func (v Enum) c() uintptr   { return uintptr(v) }
+func (v Program) c() uintptr {
+	if !v.Init {
+		ret := uintptr(0)
+		ret--
+		return ret
+	}
+	return uintptr(v.Value)
+}
+func (v Shader) c() uintptr       { return uintptr(v.Value) }
+func (v Buffer) c() uintptr       { return uintptr(v.Value) }
+func (v Framebuffer) c() uintptr  { return uintptr(v.Value) }
+func (v Renderbuffer) c() uintptr { return uintptr(v.Value) }
+func (v Texture) c() uintptr      { return uintptr(v.Value) }
+func (v Uniform) c() uintptr      { return uintptr(v.Value) }
+func (v VertexArray) c() uintptr  { return uintptr(v.Value) }
 
 func (v Attrib) String() string       { return fmt.Sprintf("Attrib(%d)", v.Value) }
 func (v Program) String() string      { return fmt.Sprintf("Program(%d)", v.Value) }
@@ -76,3 +90,4 @@ func (v Framebuffer) String() string  { return fmt.Sprintf("Framebuffer(%d)", v.
 func (v Renderbuffer) String() string { return fmt.Sprintf("Renderbuffer(%d)", v.Value) }
 func (v Texture) String() string      { return fmt.Sprintf("Texture(%d)", v.Value) }
 func (v Uniform) String() string      { return fmt.Sprintf("Uniform(%d)", v.Value) }
+func (v VertexArray) String() string  { return fmt.Sprintf("VertexArray(%d)", v.Value) }

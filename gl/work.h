@@ -2,19 +2,37 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-#ifdef os_linux
+#ifdef os_android
+// TODO(crawshaw): We could include <android/api-level.h> and
+// condition on __ANDROID_API__ to get GLES3 headers. However
+// we also need to add -lGLESv3 to LDFLAGS, which we cannot do
+// from inside an ifdef.
 #include <GLES2/gl2.h>
+#elif os_linux
+#include <GLES3/gl3.h> // install on Ubuntu with: sudo apt-get install libegl1-mesa-dev libgles2-mesa-dev libx11-dev
+#elif os_openbsd
+#include <GLES3/gl3.h>
 #endif
+
 #ifdef os_ios
 #include <OpenGLES/ES2/glext.h>
 #endif
+
 #ifdef os_osx
 #include <OpenGL/gl3.h>
+#define GL_ES_VERSION_3_0 1
+#endif
+
+#if defined(GL_ES_VERSION_3_0) && GL_ES_VERSION_3_0
+#define GLES_VERSION "GL_ES_3_0"
+#else
+#define GLES_VERSION "GL_ES_2_0"
 #endif
 
 #include <stdint.h>
 #include <stdlib.h>
 
+// TODO: generate this enum from fn.go.
 typedef enum {
 	glfnUNDEFINED,
 
@@ -25,6 +43,7 @@ typedef enum {
 	glfnBindFramebuffer,
 	glfnBindRenderbuffer,
 	glfnBindTexture,
+	glfnBindVertexArray,
 	glfnBlendColor,
 	glfnBlendEquation,
 	glfnBlendEquationSeparate,
@@ -52,6 +71,7 @@ typedef enum {
 	glfnDeleteRenderbuffer,
 	glfnDeleteShader,
 	glfnDeleteTexture,
+	glfnDeleteVertexArray,
 	glfnDepthFunc,
 	glfnDepthRangef,
 	glfnDepthMask,
@@ -71,6 +91,7 @@ typedef enum {
 	glfnGenFramebuffer,
 	glfnGenRenderbuffer,
 	glfnGenTexture,
+	glfnGenVertexArray,
 	glfnGenerateMipmap,
 	glfnGetActiveAttrib,
 	glfnGetActiveUniform,
@@ -158,8 +179,26 @@ typedef enum {
 	glfnVertexAttrib4fv,
 	glfnVertexAttribPointer,
 	glfnViewport,
+
+	// ES 3.0 functions
+	glfnUniformMatrix2x3fv,
+	glfnUniformMatrix3x2fv,
+	glfnUniformMatrix2x4fv,
+	glfnUniformMatrix4x2fv,
+	glfnUniformMatrix3x4fv,
+	glfnUniformMatrix4x3fv,
+	glfnBlitFramebuffer,
+	glfnUniform1ui,
+	glfnUniform2ui,
+	glfnUniform3ui,
+	glfnUniform4ui,
+	glfnUniform1uiv,
+	glfnUniform2uiv,
+	glfnUniform3uiv,
+	glfnUniform4uiv,
 } glfn;
 
+// TODO: generate this type from fn.go.
 struct fnargs {
 	glfn fn;
 
@@ -171,8 +210,8 @@ struct fnargs {
 	uintptr_t a5;
 	uintptr_t a6;
 	uintptr_t a7;
+	uintptr_t a8;
+	uintptr_t a9;
 };
-
-extern uintptr_t ret;
 
 extern uintptr_t processFn(struct fnargs* args, char* parg);

@@ -20,8 +20,11 @@ type Event struct {
 	// WidthPx and HeightPx are the window's dimensions in pixels.
 	WidthPx, HeightPx int
 
-	// WidthPt and HeightPt are the window's dimensions in points (1/72 of an
-	// inch).
+	// WidthPt and HeightPt are the window's physical dimensions in points
+	// (1/72 of an inch).
+	//
+	// The values are based on PixelsPerPt and are therefore approximate, as
+	// per the comment on PixelsPerPt.
 	WidthPt, HeightPt geom.Pt
 
 	// PixelsPerPt is the window's physical resolution. It is the number of
@@ -30,6 +33,13 @@ type Event struct {
 	// There are a wide variety of pixel densities in existing phones and
 	// tablets, so apps should be written to expect various non-integer
 	// PixelsPerPt values. In general, work in geom.Pt.
+	//
+	// The value is approximate, in that the OS, drivers or hardware may report
+	// approximate or quantized values. An N x N pixel square should be roughly
+	// 1 square inch for N = int(PixelsPerPt * 72), although different square
+	// lengths (in pixels) might be closer to 1 inch in practice. Nonetheless,
+	// this PixelsPerPt value should be consistent with e.g. the ratio of
+	// WidthPx to WidthPt.
 	PixelsPerPt float32
 
 	// Orientation is the orientation of the device screen.
@@ -38,7 +48,7 @@ type Event struct {
 
 // Size returns the window's size in pixels, at the time this size event was
 // sent.
-func (e *Event) Size() image.Point {
+func (e Event) Size() image.Point {
 	return image.Point{e.WidthPx, e.HeightPx}
 }
 
@@ -47,7 +57,7 @@ func (e *Event) Size() image.Point {
 //
 // The top-left pixel is always (0, 0). The bottom-right pixel is given by the
 // width and height.
-func (e *Event) Bounds() image.Rectangle {
+func (e Event) Bounds() image.Rectangle {
 	return image.Rectangle{Max: image.Point{e.WidthPx, e.HeightPx}}
 }
 

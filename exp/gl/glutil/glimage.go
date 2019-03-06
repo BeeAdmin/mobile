@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build linux darwin
+// +build linux darwin windows
 
 package glutil
 
@@ -124,7 +124,7 @@ func (p *Images) NewImage(w, h int) *Image {
 	img.gltex = p.glctx.CreateTexture()
 
 	p.glctx.BindTexture(gl.TEXTURE_2D, img.gltex)
-	p.glctx.TexImage2D(gl.TEXTURE_2D, 0, img.width, img.height, gl.RGBA, gl.UNSIGNED_BYTE, nil)
+	p.glctx.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, img.width, img.height, gl.RGBA, gl.UNSIGNED_BYTE, nil)
 	p.glctx.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
 	p.glctx.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
 	p.glctx.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -168,6 +168,9 @@ func (img *Image) Release() {
 func (img *Image) Draw(sz size.Event, topLeft, topRight, bottomLeft geom.Point, srcBounds image.Rectangle) {
 	glimage := img.images
 	glctx := img.images.glctx
+
+	glctx.BlendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+	glctx.Enable(gl.BLEND)
 
 	// TODO(crawshaw): Adjust viewport for the top bar on android?
 	glctx.UseProgram(glimage.program)
@@ -288,6 +291,8 @@ func (img *Image) Draw(sz size.Event, topLeft, topRight, bottomLeft geom.Point, 
 
 	glctx.DisableVertexAttribArray(glimage.pos)
 	glctx.DisableVertexAttribArray(glimage.inUV)
+
+	glctx.Disable(gl.BLEND)
 }
 
 var quadXYCoords = f32.Bytes(binary.LittleEndian,

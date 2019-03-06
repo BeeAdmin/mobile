@@ -2,20 +2,28 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin linux cgo
+// +build darwin linux openbsd
 
 package gl
 
 /*
-#cgo darwin,amd64  LDFLAGS: -framework OpenGL
-#cgo darwin,arm    LDFLAGS: -framework OpenGLES
-#cgo darwin,arm64  LDFLAGS: -framework OpenGLES
-#cgo linux         LDFLAGS: -lGLESv2
+#cgo ios                LDFLAGS: -framework OpenGLES
+#cgo darwin,amd64,!ios  LDFLAGS: -framework OpenGL
+#cgo darwin,arm         LDFLAGS: -framework OpenGLES
+#cgo darwin,arm64       LDFLAGS: -framework OpenGLES
+#cgo linux              LDFLAGS: -lGLESv2
+#cgo openbsd            LDFLAGS: -L/usr/X11R6/lib/ -lGLESv2
 
-#cgo darwin,amd64  CFLAGS: -Dos_osx
-#cgo darwin,arm    CFLAGS: -Dos_ios
-#cgo darwin,arm64  CFLAGS: -Dos_ios
-#cgo linux         CFLAGS: -Dos_linux
+#cgo android            CFLAGS: -Dos_android
+#cgo ios                CFLAGS: -Dos_ios
+#cgo darwin,amd64,!ios  CFLAGS: -Dos_osx
+#cgo darwin,arm         CFLAGS: -Dos_ios
+#cgo darwin,arm64       CFLAGS: -Dos_ios
+#cgo darwin             CFLAGS: -DGL_SILENCE_DEPRECATION
+#cgo linux              CFLAGS: -Dos_linux
+#cgo openbsd            CFLAGS: -Dos_openbsd
+
+#cgo openbsd            CFLAGS: -I/usr/X11R6/include/
 
 #include <stdint.h>
 #include "work.h"
@@ -66,6 +74,10 @@ type context struct {
 
 func (ctx *context) WorkAvailable() <-chan struct{} { return ctx.workAvailable }
 
+type context3 struct {
+	*context
+}
+
 // NewContext creates a cgo OpenGL context.
 //
 // See the Worker interface for more details on how it is used.
@@ -75,16 +87,19 @@ func NewContext() (Context, Worker) {
 		work:          make(chan call, workbufLen),
 		retvalue:      make(chan C.uintptr_t),
 	}
-	return glctx, glctx
+	if C.GLES_VERSION == "GL_ES_2_0" {
+		return glctx, glctx
+	}
+	return context3{glctx}, glctx
 }
 
-type call struct {
-	args     C.struct_fnargs
-	parg     unsafe.Pointer
-	blocking bool
+// Version returns a GL ES version string, either "GL_ES_2_0" or "GL_ES_3_0".
+// Future versions of the gl package may return "GL_ES_3_1".
+func Version() string {
+	return C.GLES_VERSION
 }
 
-func (ctx *context) enqueue(c call) C.uintptr_t {
+func (ctx *context) enqueue(c call) uintptr {
 	ctx.work <- c
 
 	select {
@@ -93,7 +108,7 @@ func (ctx *context) enqueue(c call) C.uintptr_t {
 	}
 
 	if c.blocking {
-		return <-ctx.retvalue
+		return uintptr(<-ctx.retvalue)
 	}
 	return 0
 }
@@ -123,7 +138,7 @@ func (ctx *context) DoWork() {
 
 		// Process the queued GL functions.
 		for i, q := range queue {
-			ctx.cargs[i] = q.args
+			ctx.cargs[i] = *(*C.struct_fnargs)(unsafe.Pointer(&q.args))
 			ctx.parg[i] = (*C.char)(q.parg)
 		}
 		ret := C.process(&ctx.cargs[0], ctx.parg[0], ctx.parg[1], ctx.parg[2], C.int(len(queue)))
@@ -136,9 +151,27 @@ func (ctx *context) DoWork() {
 	}
 }
 
-func glBoolean(b bool) C.uintptr_t {
-	if b {
-		return TRUE
+func init() {
+	if unsafe.Sizeof(C.GLint(0)) != unsafe.Sizeof(int32(0)) {
+		panic("GLint is not an int32")
 	}
-	return FALSE
+}
+
+// cString creates C string off the Go heap.
+// ret is a *char.
+func (ctx *context) cString(str string) (uintptr, func()) {
+	ptr := unsafe.Pointer(C.CString(str))
+	return uintptr(ptr), func() { C.free(ptr) }
+}
+
+// cString creates a pointer to a C string off the Go heap.
+// ret is a **char.
+func (ctx *context) cStringPtr(str string) (uintptr, func()) {
+	s, free := ctx.cString(str)
+	ptr := C.malloc(C.size_t(unsafe.Sizeof((*int)(nil))))
+	*(*uintptr)(ptr) = s
+	return uintptr(ptr), func() {
+		free()
+		C.free(ptr)
+	}
 }

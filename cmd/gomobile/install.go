@@ -30,7 +30,7 @@ For documentation, see 'go help build'.
 }
 
 func runInstall(cmd *command) error {
-	if buildTarget != "android" {
+	if !strings.HasPrefix(buildTarget, "android") {
 		return fmt.Errorf("install is not supported for -target=%s", buildTarget)
 	}
 	if err := runBuild(cmd); err != nil {
@@ -42,7 +42,7 @@ func runInstall(cmd *command) error {
 		`adb`,
 		`install`,
 		`-r`,
-		filepath.Base(pkg.Dir)+`.apk`,
+		androidPkgName(filepath.Base(pkg.Dir))+`.apk`,
 	)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr

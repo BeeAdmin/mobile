@@ -4,7 +4,15 @@
 
 package gl
 
-// Context is an OpenGL context.
+// Context is an OpenGL ES context.
+//
+// A Context has a method for every GL function supported by ES 2 or later.
+// In a program compiled with ES 3 support, a Context is also a Context3.
+// For example, a program can:
+//
+//	func f(glctx gl.Context) {
+//		glctx.(gl.Context3).BlitFramebuffer(...)
+//	}
 //
 // Calls are not safe for concurrent use. However calls can be made from
 // any goroutine, the gl package removes the notion of thread-local
@@ -47,6 +55,11 @@ type Context interface {
 	//
 	// http://www.khronos.org/opengles/sdk/docs/man3/html/glBindTexture.xhtml
 	BindTexture(target Enum, t Texture)
+
+	// BindVertexArray binds a vertex array.
+	//
+	// http://www.khronos.org/opengles/sdk/docs/man3/html/glBindVertexArray.xhtml
+	BindVertexArray(rb VertexArray)
 
 	// BlendColor sets the blend color.
 	//
@@ -179,6 +192,11 @@ type Context interface {
 	// http://www.khronos.org/opengles/sdk/docs/man3/html/glGenTextures.xhtml
 	CreateTexture() Texture
 
+	// CreateTVertexArray creates a vertex array.
+	//
+	// http://www.khronos.org/opengles/sdk/docs/man3/html/glGenVertexArrays.xhtml
+	CreateVertexArray() VertexArray
+
 	// CullFace specifies which polygons are candidates for culling.
 	//
 	// Valid modes: FRONT, BACK, FRONT_AND_BACK.
@@ -215,6 +233,11 @@ type Context interface {
 	//
 	// http://www.khronos.org/opengles/sdk/docs/man3/html/glDeleteTextures.xhtml
 	DeleteTexture(v Texture)
+
+	// DeleteVertexArray deletes the given render buffer object.
+	//
+	// http://www.khronos.org/opengles/sdk/docs/man3/html/glDeleteVertexArrays.xhtml
+	DeleteVertexArray(v VertexArray)
 
 	// DepthFunc sets the function used for depth buffer comparisons.
 	//
@@ -604,7 +627,7 @@ type Context interface {
 	// TexImage2D writes a 2D texture image.
 	//
 	// http://www.khronos.org/opengles/sdk/docs/man3/html/glTexImage2D.xhtml
-	TexImage2D(target Enum, level int, width, height int, format Enum, ty Enum, data []byte)
+	TexImage2D(target Enum, level int, internalFormat int, width, height int, format Enum, ty Enum, data []byte)
 
 	// TexSubImage2D writes a subregion of a 2D texture image.
 	//
@@ -814,6 +837,19 @@ type Context interface {
 	//
 	// http://www.khronos.org/opengles/sdk/docs/man3/html/glViewport.xhtml
 	Viewport(x, y, width, height int)
+}
+
+// Context3 is an OpenGL ES 3 context.
+//
+// When the gl package is compiled with GL ES 3 support, the produced
+// Context object also implements the Context3 interface.
+type Context3 interface {
+	Context
+
+	// BlitFramebuffer copies a block of pixels between framebuffers.
+	//
+	// https://www.khronos.org/opengles/sdk/docs/man3/html/glBlitFramebuffer.xhtml
+	BlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1 int, mask uint, filter Enum)
 }
 
 // Worker is used by display driver code to execute OpenGL calls.

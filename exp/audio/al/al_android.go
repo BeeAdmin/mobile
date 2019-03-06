@@ -13,20 +13,23 @@ package al
 #include <AL/al.h>
 #include <AL/alc.h>
 
-void al_init(uintptr_t java_vm, uintptr_t jni_env, uintptr_t context, void** handle) {
+void al_init(uintptr_t java_vm, uintptr_t jni_env, jobject context, void** handle) {
   JavaVM* vm = (JavaVM*)java_vm;
   JNIEnv* env = (JNIEnv*)jni_env;
 
   jclass android_content_Context = (*env)->FindClass(env, "android/content/Context");
-  jmethodID get_package_name = (*env)->GetMethodID(env, android_content_Context, "getPackageName", "()Ljava/lang/String;");
-  jstring package_name = (*env)->CallObjectMethod(env, context, get_package_name);
-  const char *cpackage_name = (*env)->GetStringUTFChars(env, package_name, 0);
+  jmethodID get_application_info = (*env)->GetMethodID(env, android_content_Context, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
+  jclass android_content_pm_ApplicationInfo = (*env)->FindClass(env, "android/content/pm/ApplicationInfo");
+  jfieldID native_library_dir = (*env)->GetFieldID(env, android_content_pm_ApplicationInfo, "nativeLibraryDir", "Ljava/lang/String;");
+  jobject app_info = (*env)->CallObjectMethod(env, context, get_application_info);
+  jstring native_dir = (*env)->GetObjectField(env, app_info, native_library_dir);
+  const char *cnative_dir = (*env)->GetStringUTFChars(env, native_dir, 0);
 
-  char lib_path[PATH_MAX] = "/data/data/";
-  strlcat(lib_path, cpackage_name, sizeof(lib_path));
-  strlcat(lib_path, "/lib/libopenal.so", sizeof(lib_path));
+  char lib_path[PATH_MAX] = "";
+  strlcat(lib_path, cnative_dir, sizeof(lib_path));
+  strlcat(lib_path, "/libopenal.so", sizeof(lib_path));
   *handle = dlopen(lib_path, RTLD_LAZY);
-  (*env)->ReleaseStringUTFChars(env, package_name, cpackage_name);
+  (*env)->ReleaseStringUTFChars(env, native_dir, cnative_dir);
 }
 
 void call_alEnable(LPALENABLE fn, ALenum capability) {
@@ -45,8 +48,24 @@ ALint call_alGetInteger(LPALGETINTEGER fn, ALenum p) {
   return fn(p);
 }
 
+void call_alGetIntegerv(LPALGETINTEGERV fn, ALenum p, ALint* v) {
+  fn(p, v);
+}
+
 ALfloat call_alGetFloat(LPALGETFLOAT fn, ALenum p) {
   return fn(p);
+}
+
+void call_alGetFloatv(LPALGETFLOATV fn, ALenum p, ALfloat* v) {
+  fn(p, v);
+}
+
+ALboolean call_alGetBoolean(LPALGETBOOLEAN fn, ALenum p) {
+  return fn(p);
+}
+
+void call_alGetBooleanv(LPALGETBOOLEANV fn, ALenum p, ALboolean* v) {
+  fn(p, v);
 }
 
 const char* call_alGetString(LPALGETSTRING fn, ALenum p) {
@@ -180,7 +199,11 @@ var (
 	alDisableFunc              C.LPALDISABLE
 	alIsEnabledFunc            C.LPALISENABLED
 	alGetIntegerFunc           C.LPALGETINTEGER
+	alGetIntegervFunc          C.LPALGETINTEGERV
 	alGetFloatFunc             C.LPALGETFLOAT
+	alGetFloatvFunc            C.LPALGETFLOATV
+	alGetBooleanFunc           C.LPALGETBOOLEAN
+	alGetBooleanvFunc          C.LPALGETBOOLEANV
 	alGetStringFunc            C.LPALGETSTRING
 	alDistanceModelFunc        C.LPALDISTANCEMODEL
 	alDopplerFactorFunc        C.LPALDOPPLERFACTOR
@@ -221,7 +244,7 @@ var (
 
 func initAL() {
 	err := mobileinit.RunOnJVM(func(vm, env, ctx uintptr) error {
-		C.al_init(C.uintptr_t(vm), C.uintptr_t(env), C.uintptr_t(ctx), &alHandle)
+		C.al_init(C.uintptr_t(vm), C.uintptr_t(env), C.jobject(ctx), &alHandle)
 		if alHandle == nil {
 			return errors.New("al: cannot load libopenal.so")
 		}
@@ -235,7 +258,11 @@ func initAL() {
 	alDisableFunc = C.LPALDISABLE(fn("alDisable"))
 	alIsEnabledFunc = C.LPALISENABLED(fn("alIsEnabled"))
 	alGetIntegerFunc = C.LPALGETINTEGER(fn("alGetInteger"))
+	alGetIntegervFunc = C.LPALGETINTEGERV(fn("alGetIntegerv"))
 	alGetFloatFunc = C.LPALGETFLOAT(fn("alGetFloat"))
+	alGetFloatvFunc = C.LPALGETFLOATV(fn("alGetFloatv"))
+	alGetBooleanFunc = C.LPALGETBOOLEAN(fn("alGetBoolean"))
+	alGetBooleanvFunc = C.LPALGETBOOLEANV(fn("alGetBooleanv"))
 	alGetStringFunc = C.LPALGETSTRING(fn("alGetString"))
 	alDistanceModelFunc = C.LPALDISTANCEMODEL(fn("alDistanceModel"))
 	alDopplerFactorFunc = C.LPALDOPPLERFACTOR(fn("alDopplerFactor"))
@@ -301,8 +328,32 @@ func alGetInteger(k int) int32 {
 	return int32(C.call_alGetInteger(alGetIntegerFunc, C.ALenum(k)))
 }
 
+func alGetIntegerv(k int, v []int32) {
+	C.call_alGetIntegerv(alGetIntegervFunc, C.ALenum(k), (*C.ALint)(unsafe.Pointer(&v[0])))
+}
+
 func alGetFloat(k int) float32 {
 	return float32(C.call_alGetFloat(alGetFloatFunc, C.ALenum(k)))
+}
+
+func alGetFloatv(k int, v []float32) {
+	C.call_alGetFloatv(alGetFloatvFunc, C.ALenum(k), (*C.ALfloat)(unsafe.Pointer(&v[0])))
+}
+
+func alGetBoolean(k int) bool {
+	return C.call_alGetBoolean(alGetBooleanFunc, C.ALenum(k)) == C.AL_TRUE
+}
+
+func alGetBooleanv(k int, v []bool) {
+	val := make([]C.ALboolean, len(v))
+	for i, bv := range v {
+		if bv {
+			val[i] = C.AL_TRUE
+		} else {
+			val[i] = C.AL_FALSE
+		}
+	}
+	C.call_alGetBooleanv(alGetBooleanvFunc, C.ALenum(k), &val[0])
 }
 
 func alGetString(v int) string {

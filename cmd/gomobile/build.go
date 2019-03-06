@@ -14,8 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
-	"strconv"
 	"strings"
 )
 
@@ -26,7 +24,7 @@ var tmpdir string
 var cmdBuild = &command{
 	run:   runBuild,
 	Name:  "build",
-	Usage: "[-target android|ios] [-o output] [build flags] [package]",
+	Usage: "[-target android|ios] [-o output] [-bundleid bundleID] [build flags] [package]",
 	Short: "compile android APK and iOS app",
 	Long: `
 Build compiles and encodes the app named by the import path.
@@ -38,13 +36,22 @@ default) or ios.
 
 For -target android, if an AndroidManifest.xml is defined in the
 package directory, it is added to the APK output. Otherwise, a default
-manifest is generated.
+manifest is generated. By default, this builds a fat APK for all supported
+instruction sets (arm, 386, amd64, arm64). A subset of instruction sets can
+be selected by specifying target type with the architecture name. E.g.
+-target=android/arm,android/386.
 
 For -target ios, gomobile must be run on an OS X machine with Xcode
-installed. Support is not complete.
+installed.
 
 If the package directory contains an assets subdirectory, its contents
 are copied into the output.
+
+Flag -iosversion sets the minimal version of the iOS SDK to compile against.
+The default version is 7.0.
+
+The -bundleid flag is required for -target ios and sets the bundle ID to use
+with the app.
 
 The -o flag specifies the output file name. If not specified, the
 output file name depends on the package built.
@@ -65,14 +72,20 @@ func runBuild(cmd *command) (err error) {
 
 	args := cmd.flag.Args()
 
-	ctx.GOARCH = "arm"
-	switch buildTarget {
-	case "android":
-		ctx.GOOS = "android"
-	case "ios":
-		ctx.GOOS = "darwin"
-	default:
-		return fmt.Errorf(`unknown -target, %q.`, buildTarget)
+	targetOS, targetArchs, err := parseBuildTarget(buildTarget)
+	if err != nil {
+		return fmt.Errorf(`invalid -target=%q: %v`, buildTarget, err)
+	}
+
+	oldCtx := ctx
+	defer func() {
+		ctx = oldCtx
+	}()
+	ctx.GOARCH = targetArchs[0]
+	ctx.GOOS = targetOS
+
+	if ctx.GOOS == "darwin" {
+		ctx.BuildTags = append(ctx.BuildTags, "ios")
 	}
 
 	switch len(args) {
@@ -93,26 +106,38 @@ func runBuild(cmd *command) (err error) {
 	}
 
 	var nmpkgs map[string]bool
-	switch buildTarget {
+	switch targetOS {
 	case "android":
 		if pkg.Name != "main" {
-			return goBuild(pkg.ImportPath, androidArmEnv)
+			for _, arch := range targetArchs {
+				env := androidEnv[arch]
+				if err := goBuild(pkg.ImportPath, env); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-		nmpkgs, err = goAndroidBuild(pkg)
+		nmpkgs, err = goAndroidBuild(pkg, targetArchs)
 		if err != nil {
 			return err
 		}
-	case "ios":
-		if runtime.GOOS != "darwin" {
-			return fmt.Errorf("-target=ios requires darwin host")
+	case "darwin":
+		if !xcodeAvailable() {
+			return fmt.Errorf("-target=ios requires XCode")
 		}
 		if pkg.Name != "main" {
-			if err := goBuild(pkg.ImportPath, darwinArmEnv); err != nil {
-				return err
+			for _, arch := range targetArchs {
+				env := darwinEnv[arch]
+				if err := goBuild(pkg.ImportPath, env); err != nil {
+					return err
+				}
 			}
-			return goBuild(pkg.ImportPath, darwinArm64Env)
+			return nil
 		}
-		nmpkgs, err = goIOSBuild(pkg)
+		if buildBundleID == "" {
+			return fmt.Errorf("-target=ios requires -bundleid set")
+		}
+		nmpkgs, err = goIOSBuild(pkg, buildBundleID, targetArchs)
 		if err != nil {
 			return err
 		}
@@ -125,7 +150,7 @@ func runBuild(cmd *command) (err error) {
 	return nil
 }
 
-var nmRE = regexp.MustCompile(`[0-9a-f]{8} t (golang.org/x.*/[^.]*)`)
+var nmRE = regexp.MustCompile(`[0-9a-f]{8} t (?:.*/vendor/)?(golang.org/x.*/[^.]*)`)
 
 func extractPkgs(nm string, path string) (map[string]bool, error) {
 	if buildN {
@@ -182,14 +207,8 @@ func printcmd(format string, args ...interface{}) {
 	if gomobilepath != "" {
 		cmd = strings.Replace(cmd, gomobilepath, "$GOMOBILE", -1)
 	}
-	if goroot := goEnv("GOROOT"); goroot != "" {
-		cmd = strings.Replace(cmd, goroot, "$GOROOT", -1)
-	}
 	if gopath := goEnv("GOPATH"); gopath != "" {
 		cmd = strings.Replace(cmd, gopath, "$GOPATH", -1)
-	}
-	if env := os.Getenv("HOME"); env != "" {
-		cmd = strings.Replace(cmd, env, "$HOME", -1)
 	}
 	if env := os.Getenv("HOMEPATH"); env != "" {
 		cmd = strings.Replace(cmd, env, "$HOMEPATH", -1)
@@ -199,16 +218,18 @@ func printcmd(format string, args ...interface{}) {
 
 // "Build flags", used by multiple commands.
 var (
-	buildA       bool   // -a
-	buildI       bool   // -i
-	buildN       bool   // -n
-	buildV       bool   // -v
-	buildX       bool   // -x
-	buildO       string // -o
-	buildGcflags string // -gcflags
-	buildLdflags string // -ldflags
-	buildTarget  string // -target
-	buildWork    bool   // -work
+	buildA          bool   // -a
+	buildI          bool   // -i
+	buildN          bool   // -n
+	buildV          bool   // -v
+	buildX          bool   // -x
+	buildO          string // -o
+	buildGcflags    string // -gcflags
+	buildLdflags    string // -ldflags
+	buildTarget     string // -target
+	buildWork       bool   // -work
+	buildBundleID   string // -bundleid
+	buildIOSVersion string // -iosversion
 )
 
 func addBuildFlags(cmd *command) {
@@ -216,6 +237,8 @@ func addBuildFlags(cmd *command) {
 	cmd.flag.StringVar(&buildGcflags, "gcflags", "", "")
 	cmd.flag.StringVar(&buildLdflags, "ldflags", "", "")
 	cmd.flag.StringVar(&buildTarget, "target", "android", "")
+	cmd.flag.StringVar(&buildBundleID, "bundleid", "", "")
+	cmd.flag.StringVar(&buildIOSVersion, "iosversion", "7.0", "")
 
 	cmd.flag.BoolVar(&buildA, "a", false, "")
 	cmd.flag.BoolVar(&buildI, "i", false, "")
@@ -245,22 +268,30 @@ func init() {
 
 	addBuildFlags(cmdBind)
 	addBuildFlagsNVXWork(cmdBind)
+
+	addBuildFlagsNVXWork(cmdClean)
 }
 
 func goBuild(src string, env []string, args ...string) error {
-	// The -p flag is to speed up darwin/arm builds.
-	// Remove when golang.org/issue/10477 is resolved.
+	return goCmd("build", []string{src}, env, args...)
+}
+
+func goInstall(srcs []string, env []string, args ...string) error {
+	return goCmd("install", srcs, env, args...)
+}
+
+func goCmd(subcmd string, srcs []string, env []string, args ...string) error {
 	cmd := exec.Command(
 		"go",
-		"build",
-		fmt.Sprintf("-p=%d", runtime.NumCPU()),
-		"-pkgdir="+pkgdir(env),
-		"-tags="+strconv.Quote(strings.Join(ctx.BuildTags, ",")),
+		subcmd,
 	)
+	if len(ctx.BuildTags) > 0 {
+		cmd.Args = append(cmd.Args, "-tags", strings.Join(ctx.BuildTags, " "))
+	}
 	if buildV {
 		cmd.Args = append(cmd.Args, "-v")
 	}
-	if buildI {
+	if subcmd != "install" && buildI {
 		cmd.Args = append(cmd.Args, "-i")
 	}
 	if buildX {
@@ -276,7 +307,68 @@ func goBuild(src string, env []string, args ...string) error {
 		cmd.Args = append(cmd.Args, "-work")
 	}
 	cmd.Args = append(cmd.Args, args...)
-	cmd.Args = append(cmd.Args, src)
+	cmd.Args = append(cmd.Args, srcs...)
 	cmd.Env = append([]string{}, env...)
 	return runCmd(cmd)
+}
+
+func parseBuildTarget(buildTarget string) (os string, archs []string, _ error) {
+	if buildTarget == "" {
+		return "", nil, fmt.Errorf(`invalid target ""`)
+	}
+
+	all := false
+	archNames := []string{}
+	for i, p := range strings.Split(buildTarget, ",") {
+		osarch := strings.SplitN(p, "/", 2) // len(osarch) > 0
+		if osarch[0] != "android" && osarch[0] != "ios" {
+			return "", nil, fmt.Errorf(`unsupported os`)
+		}
+
+		if i == 0 {
+			os = osarch[0]
+		}
+
+		if os != osarch[0] {
+			return "", nil, fmt.Errorf(`cannot target different OSes`)
+		}
+
+		if len(osarch) == 1 {
+			all = true
+		} else {
+			archNames = append(archNames, osarch[1])
+		}
+	}
+
+	// verify all archs are supported one while deduping.
+	isSupported := func(arch string) bool {
+		for _, a := range allArchs {
+			if a == arch {
+				return true
+			}
+		}
+		return false
+	}
+
+	seen := map[string]bool{}
+	for _, arch := range archNames {
+		if _, ok := seen[arch]; ok {
+			continue
+		}
+		if !isSupported(arch) {
+			return "", nil, fmt.Errorf(`unsupported arch: %q`, arch)
+		}
+
+		seen[arch] = true
+		archs = append(archs, arch)
+	}
+
+	targetOS := os
+	if os == "ios" {
+		targetOS = "darwin"
+	}
+	if all {
+		return targetOS, allArchs, nil
+	}
+	return targetOS, archs, nil
 }

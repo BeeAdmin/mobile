@@ -5,8 +5,10 @@
 package bind
 
 import (
+	"fmt"
 	"go/types"
 	"log"
+	"strings"
 )
 
 type ifaceSummary struct {
@@ -74,6 +76,11 @@ func exportedMethodSet(T types.Type) []*types.Func {
 		if !obj.Exported() {
 			continue
 		}
+		// Skip methods from the embedded classes, so that
+		// only methods that are implemented in Go are included.
+		if pref := pkgFirstElem(obj.Pkg()); pref == "Java" || pref == "ObjC" {
+			continue
+		}
 		switch obj := obj.(type) {
 		case *types.Func:
 			methods = append(methods, obj)
@@ -114,4 +121,52 @@ func isExported(t types.Type) bool {
 	default:
 		return true
 	}
+}
+
+func isRefType(t types.Type) bool {
+	if isErrorType(t) {
+		return false
+	}
+	switch t := t.(type) {
+	case *types.Named:
+		switch u := t.Underlying().(type) {
+		case *types.Interface:
+			return true
+		default:
+			panic(fmt.Sprintf("unsupported named type: %s / %T", u, u))
+		}
+	case *types.Pointer:
+		return isRefType(t.Elem())
+	default:
+		return false
+	}
+}
+
+func isNullableType(t types.Type) bool {
+	return types.AssignableTo(types.Typ[types.UntypedNil].Underlying(), t) || t.String() == "string" // string is mapped to NSString*, which is nullable
+}
+
+func typePkgFirstElem(t types.Type) string {
+	nt, ok := t.(*types.Named)
+	if !ok {
+		return ""
+	}
+	return pkgFirstElem(nt.Obj().Pkg())
+}
+
+func pkgFirstElem(p *types.Package) string {
+	if p == nil {
+		return ""
+	}
+	path := p.Path()
+	idx := strings.Index(path, "/")
+	if idx == -1 {
+		return path
+	}
+	return path[:idx]
+}
+
+func isWrapperType(t types.Type) bool {
+	e := typePkgFirstElem(t)
+	return e == "Java" || e == "ObjC"
 }

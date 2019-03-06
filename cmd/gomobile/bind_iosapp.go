@@ -8,19 +8,38 @@ import (
 	"fmt"
 	"go/build"
 	"io"
-	"io/ioutil"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
 )
 
-func goIOSBind(pkg *build.Package) error {
-	binder, err := newBinder(pkg)
-	if err != nil {
+func goIOSBind(gobind string, pkgs []*build.Package, archs []string) error {
+	// Run gobind to generate the bindings
+	cmd := exec.Command(
+		gobind,
+		"-lang=go,objc",
+		"-outdir="+tmpdir,
+	)
+	cmd.Env = append(cmd.Env, "GOOS=darwin")
+	cmd.Env = append(cmd.Env, "CGO_ENABLED=1")
+	if len(ctx.BuildTags) > 0 {
+		cmd.Args = append(cmd.Args, "-tags="+strings.Join(ctx.BuildTags, ","))
+	}
+	if bindPrefix != "" {
+		cmd.Args = append(cmd.Args, "-prefix="+bindPrefix)
+	}
+	for _, p := range pkgs {
+		cmd.Args = append(cmd.Args, p.ImportPath)
+	}
+	if err := runCmd(cmd); err != nil {
 		return err
 	}
-	name := binder.pkg.Name()
+
+	srcDir := filepath.Join(tmpdir, "src", "gobind")
+	gopath := fmt.Sprintf("GOPATH=%s%c%s", tmpdir, filepath.ListSeparator, goEnv("GOPATH"))
+
+	name := pkgs[0].Name
 	title := strings.Title(name)
 
 	if buildO != "" && !strings.HasSuffix(buildO, ".framework") {
@@ -30,29 +49,22 @@ func goIOSBind(pkg *build.Package) error {
 		buildO = title + ".framework"
 	}
 
-	if err := binder.GenGo(filepath.Join(tmpdir, "src")); err != nil {
-		return err
+	fileBases := make([]string, len(pkgs)+1)
+	for i, pkg := range pkgs {
+		fileBases[i] = bindPrefix + strings.Title(pkg.Name)
 	}
-	mainFile := filepath.Join(tmpdir, "src/iosbin/main.go")
-	err = writeFile(mainFile, func(w io.Writer) error {
-		return iosBindTmpl.Execute(w, "../go_"+name)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create the binding package for iOS: %v", err)
-	}
-	if err := binder.GenObjc(filepath.Join(tmpdir, "objc")); err != nil {
-		return err
-	}
+	fileBases[len(fileBases)-1] = "Universe"
 
-	cmd := exec.Command("xcrun", "lipo", "-create")
+	cmd = exec.Command("xcrun", "lipo", "-create")
 
-	for _, env := range [][]string{darwinArmEnv, darwinArm64Env, darwinAmd64Env} {
-		arch := archClang(getenv(env, "GOARCH"))
-		path, err := goIOSBindArchive(name, mainFile, env)
+	for _, arch := range archs {
+		env := darwinEnv[arch]
+		env = append(env, gopath)
+		path, err := goIOSBindArchive(name, env)
 		if err != nil {
 			return fmt.Errorf("darwin-%s: %v", arch, err)
 		}
-		cmd.Args = append(cmd.Args, "-arch", arch, path)
+		cmd.Args = append(cmd.Args, "-arch", archClang(arch), path)
 	}
 
 	// Build static framework output directory.
@@ -79,12 +91,41 @@ func goIOSBind(pkg *build.Package) error {
 	}
 
 	// Copy header file next to output archive.
-	err = copyFile(
-		headers+"/"+title+".h",
-		tmpdir+"/objc/"+bindPrefix+title+".h",
-	)
-	if err != nil {
-		return err
+	headerFiles := make([]string, len(fileBases))
+	if len(fileBases) == 1 {
+		headerFiles[0] = title + ".h"
+		err := copyFile(
+			headers+"/"+title+".h",
+			srcDir+"/"+bindPrefix+title+".objc.h",
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		for i, fileBase := range fileBases {
+			headerFiles[i] = fileBase + ".objc.h"
+			err := copyFile(
+				headers+"/"+fileBase+".objc.h",
+				srcDir+"/"+fileBase+".objc.h")
+			if err != nil {
+				return err
+			}
+		}
+		err := copyFile(
+			headers+"/ref.h",
+			srcDir+"/ref.h")
+		if err != nil {
+			return err
+		}
+		headerFiles = append(headerFiles, title+".h")
+		err = writeFile(headers+"/"+title+".h", func(w io.Writer) error {
+			return iosBindHeaderTmpl.Execute(w, map[string]interface{}{
+				"pkgs": pkgs, "title": title, "bases": fileBases,
+			})
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	resources := buildO + "/Versions/A/Resources"
@@ -94,16 +135,20 @@ func goIOSBind(pkg *build.Package) error {
 	if err := symlink("Versions/Current/Resources", buildO+"/Resources"); err != nil {
 		return err
 	}
-	if err := ioutil.WriteFile(buildO+"/Resources/Info.plist", []byte(iosBindInfoPlist), 0666); err != nil {
+	err := writeFile(buildO+"/Resources/Info.plist", func(w io.Writer) error {
+		_, err := w.Write([]byte(iosBindInfoPlist))
+		return err
+	})
+	if err != nil {
 		return err
 	}
 
 	var mmVals = struct {
-		Module string
-		Header string
+		Module  string
+		Headers []string
 	}{
-		Module: title,
-		Header: title + ".h",
+		Module:  title,
+		Headers: headerFiles,
 	}
 	err = writeFile(buildO+"/Versions/A/Modules/module.modulemap", func(w io.Writer) error {
 		return iosModuleMapTmpl.Execute(w, mmVals)
@@ -123,51 +168,33 @@ const iosBindInfoPlist = `<?xml version="1.0" encoding="UTF-8"?>
 `
 
 var iosModuleMapTmpl = template.Must(template.New("iosmmap").Parse(`framework module "{{.Module}}" {
-    header "{{.Header}}"
+	header "ref.h"
+{{range .Headers}}    header "{{.}}"
+{{end}}
     export *
 }`))
 
-func goIOSBindArchive(name, path string, env []string) (string, error) {
+func goIOSBindArchive(name string, env []string) (string, error) {
 	arch := getenv(env, "GOARCH")
 	archive := filepath.Join(tmpdir, name+"-"+arch+".a")
-	err := goBuild(path, env, "-buildmode=c-archive", "-tags=ios", "-o", archive)
+	err := goBuild("gobind", env, "-buildmode=c-archive", "-o", archive)
 	if err != nil {
 		return "", err
 	}
 
-	obj := "gobind-" + name + "-" + arch + ".o"
-	cmd := exec.Command(
-		getenv(env, "CC"),
-		"-I", ".",
-		"-g", "-O2",
-		"-o", obj,
-		"-fobjc-arc", // enable ARC
-		"-c", bindPrefix+strings.Title(name)+".m",
-	)
-	cmd.Args = append(cmd.Args, strings.Split(getenv(env, "CGO_CFLAGS"), " ")...)
-	cmd.Dir = filepath.Join(tmpdir, "objc")
-	cmd.Env = append([]string{}, env...)
-	if err := runCmd(cmd); err != nil {
-		return "", err
-	}
-
-	cmd = exec.Command("ar", "-q", "-s", archive, obj)
-	cmd.Dir = filepath.Join(tmpdir, "objc")
-	if err := runCmd(cmd); err != nil {
-		return "", err
-	}
 	return archive, nil
 }
 
-var iosBindTmpl = template.Must(template.New("ios.go").Parse(`
-package main
+var iosBindHeaderTmpl = template.Must(template.New("ios.h").Parse(`
+// Objective-C API for talking to the following Go packages
+//
+{{range .pkgs}}//	{{.ImportPath}}
+{{end}}//
+// File is generated by gomobile bind. Do not edit.
+#ifndef __{{.title}}_FRAMEWORK_H__
+#define __{{.title}}_FRAMEWORK_H__
 
-import (
-	_ "golang.org/x/mobile/bind/objc"
-	_ "{{.}}"
-)
-
-import "C"
-
-func main() {}
+{{range .bases}}#include "{{.}}.objc.h"
+{{end}}
+#endif
 `))

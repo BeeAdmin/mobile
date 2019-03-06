@@ -35,16 +35,9 @@ package app
 #include <pthread.h>
 #include <stdlib.h>
 
-JavaVM* current_vm;
-jobject current_ctx;
-jclass current_ctx_clazz;
-
-jclass app_find_class(JNIEnv* env, const char* name);
-
 EGLDisplay display;
 EGLSurface surface;
 
-char* initEGLDisplay();
 char* createEGLSurface(ANativeWindow* window);
 char* destroyEGLSurface();
 int32_t getKeyRune(JNIEnv* env, AInputEvent* e);
@@ -67,9 +60,21 @@ import (
 	"golang.org/x/mobile/internal/mobileinit"
 )
 
+// RunOnJVM runs fn on a new goroutine locked to an OS thread with a JNIEnv.
+//
+// RunOnJVM blocks until the call to fn is complete. Any Java
+// exception or failure to attach to the JVM is returned as an error.
+//
+// The function fn takes vm, the current JavaVM*,
+// env, the current JNIEnv*, and
+// ctx, a jobject representing the global android.context.Context.
+func RunOnJVM(fn func(vm, jniEnv, ctx uintptr) error) error {
+	return mobileinit.RunOnJVM(fn)
+}
+
 //export setCurrentContext
 func setCurrentContext(vm *C.JavaVM, ctx C.jobject) {
-	mobileinit.SetCurrentContext(unsafe.Pointer(vm), unsafe.Pointer(ctx))
+	mobileinit.SetCurrentContext(unsafe.Pointer(vm), uintptr(ctx))
 }
 
 //export callMain
@@ -132,7 +137,7 @@ func onDestroy(activity *C.ANativeActivity) {
 }
 
 //export onWindowFocusChanged
-func onWindowFocusChanged(activity *C.ANativeActivity, hasFocus int) {
+func onWindowFocusChanged(activity *C.ANativeActivity, hasFocus C.int) {
 }
 
 //export onNativeWindowCreated
@@ -157,7 +162,6 @@ func onNativeWindowDestroyed(activity *C.ANativeActivity, window *C.ANativeWindo
 
 //export onInputQueueCreated
 func onInputQueueCreated(activity *C.ANativeActivity, q *C.AInputQueue) {
-	C.AInputQueue_detachLooper(q)
 	inputQueue <- q
 	<-inputQueueDone
 }
@@ -184,6 +188,16 @@ func windowConfigRead(activity *C.ANativeActivity) windowConfig {
 	density := C.AConfiguration_getDensity(aconfig)
 	C.AConfiguration_delete(aconfig)
 
+	// Calculate the screen resolution. This value is approximate. For example,
+	// a physical resolution of 200 DPI may be quantized to one of the
+	// ACONFIGURATION_DENSITY_XXX values such as 160 or 240.
+	//
+	// A more accurate DPI could possibly be calculated from
+	// https://developer.android.com/reference/android/util/DisplayMetrics.html#xdpi
+	// but this does not appear to be accessible via the NDK. In any case, the
+	// hardware might not even provide a more accurate number, as the system
+	// does not apparently use the reported value. See golang.org/issue/13366
+	// for a discussion.
 	var dpi int
 	switch density {
 	case C.ACONFIGURATION_DENSITY_DEFAULT:

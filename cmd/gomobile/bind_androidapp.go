@@ -15,95 +15,86 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"text/template"
 )
 
-func goAndroidBind(pkg *build.Package) error {
+func goAndroidBind(gobind string, pkgs []*build.Package, androidArchs []string) error {
 	if sdkDir := os.Getenv("ANDROID_HOME"); sdkDir == "" {
 		return fmt.Errorf("this command requires ANDROID_HOME environment variable (path to the Android SDK)")
 	}
 
-	binder, err := newBinder(pkg)
-	if err != nil {
-		return err
+	// Run gobind to generate the bindings
+	cmd := exec.Command(
+		gobind,
+		"-lang=go,java",
+		"-outdir="+tmpdir,
+	)
+	cmd.Env = append(cmd.Env, "GOOS=android")
+	cmd.Env = append(cmd.Env, "CGO_ENABLED=1")
+	if len(ctx.BuildTags) > 0 {
+		cmd.Args = append(cmd.Args, "-tags="+strings.Join(ctx.BuildTags, ","))
 	}
-
-	if err := binder.GenGo(tmpdir); err != nil {
-		return err
+	if bindJavaPkg != "" {
+		cmd.Args = append(cmd.Args, "-javapkg="+bindJavaPkg)
 	}
-
-	mainFile := filepath.Join(tmpdir, "androidlib/main.go")
-	err = writeFile(mainFile, func(w io.Writer) error {
-		return androidMainTmpl.Execute(w, "../go_"+binder.pkg.Name())
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create the main package for android: %v", err)
+	if bindClasspath != "" {
+		cmd.Args = append(cmd.Args, "-classpath="+bindClasspath)
+	}
+	if bindBootClasspath != "" {
+		cmd.Args = append(cmd.Args, "-bootclasspath="+bindBootClasspath)
+	}
+	for _, p := range pkgs {
+		cmd.Args = append(cmd.Args, p.ImportPath)
+	}
+	if err := runCmd(cmd); err != nil {
+		return err
 	}
 
 	androidDir := filepath.Join(tmpdir, "android")
 
-	err = goBuild(
-		mainFile,
-		androidArmEnv,
-		"-buildmode=c-shared",
-		"-o="+filepath.Join(androidDir, "src/main/jniLibs/armeabi-v7a/libgojni.so"),
-	)
-	if err != nil {
-		return err
+	// Generate binding code and java source code only when processing the first package.
+	for _, arch := range androidArchs {
+		env := androidEnv[arch]
+		// Add the generated packages to GOPATH
+		gopath := fmt.Sprintf("GOPATH=%s%c%s", tmpdir, filepath.ListSeparator, goEnv("GOPATH"))
+		env = append(env, gopath)
+		toolchain := ndk.Toolchain(arch)
+
+		err := goBuild(
+			"gobind",
+			env,
+			"-buildmode=c-shared",
+			"-o="+filepath.Join(androidDir, "src/main/jniLibs/"+toolchain.abi+"/libgojni.so"),
+		)
+		if err != nil {
+			return err
+		}
 	}
 
-	p, err := ctx.Import("golang.org/x/mobile/bind", cwd, build.ImportComment)
-	if err != nil {
-		return fmt.Errorf(`"golang.org/x/mobile/bind" is not found; run go get golang.org/x/mobile/bind`)
-	}
-	repo := filepath.Clean(filepath.Join(p.Dir, "..")) // golang.org/x/mobile directory.
-
-	pkgpath := strings.Replace(bindJavaPkg, ".", "/", -1)
-	if bindJavaPkg == "" {
-		pkgpath = "go/" + binder.pkg.Name()
-	}
-	if err := binder.GenJava(filepath.Join(androidDir, "src/main/java/"+pkgpath)); err != nil {
+	jsrc := filepath.Join(tmpdir, "java")
+	if err := buildAAR(jsrc, androidDir, pkgs, androidArchs); err != nil {
 		return err
 	}
-
-	dst := filepath.Join(androidDir, "src/main/java/go/LoadJNI.java")
-	genLoadJNI := func(w io.Writer) error {
-		_, err := io.WriteString(w, loadSrc)
-		return err
-	}
-	if err := writeFile(dst, genLoadJNI); err != nil {
-		return err
-	}
-
-	src := filepath.Join(repo, "bind/java/Seq.java")
-	dst = filepath.Join(androidDir, "src/main/java/go/Seq.java")
-	rm(dst)
-	if err := symlink(src, dst); err != nil {
-		return err
-	}
-
-	return buildAAR(androidDir, pkg)
+	return buildSrcJar(jsrc)
 }
 
-var loadSrc = `package go;
-
-public class LoadJNI {
-	static {
-		System.loadLibrary("gojni");
+func buildSrcJar(src string) error {
+	var out io.Writer = ioutil.Discard
+	if !buildN {
+		ext := filepath.Ext(buildO)
+		f, err := os.Create(buildO[:len(buildO)-len(ext)] + "-sources.jar")
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
+		}()
+		out = f
 	}
+
+	return writeJar(out, src)
 }
-`
-
-var androidMainTmpl = template.Must(template.New("android.go").Parse(`
-package main
-
-import (
-	_ "golang.org/x/mobile/bind/java"
-	_ "{{.}}"
-)
-
-func main() {}
-`))
 
 // AAR is the format for the binary distribution of an Android Library Project
 // and it is a ZIP archive with extension .aar.
@@ -123,10 +114,10 @@ func main() {}
 //	aidl (optional, not relevant)
 //
 // javac and jar commands are needed to build classes.jar.
-func buildAAR(androidDir string, pkg *build.Package) (err error) {
+func buildAAR(srcDir, androidDir string, pkgs []*build.Package, androidArchs []string) (err error) {
 	var out io.Writer = ioutil.Discard
 	if buildO == "" {
-		buildO = pkg.Name + ".aar"
+		buildO = pkgs[0].Name + ".aar"
 	}
 	if !strings.HasSuffix(buildO, ".aar") {
 		return fmt.Errorf("output file name %q does not end in '.aar'", buildO)
@@ -157,71 +148,88 @@ func buildAAR(androidDir string, pkg *build.Package) (err error) {
 	}
 	const manifestFmt = `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package=%q>
 <uses-sdk android:minSdkVersion="%d"/></manifest>`
-	fmt.Fprintf(w, manifestFmt, "go."+pkg.Name+".gojni", minAndroidAPI)
+	fmt.Fprintf(w, manifestFmt, "go."+pkgs[0].Name+".gojni", minAndroidAPI)
 
 	w, err = aarwcreate("proguard.txt")
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(w, `-keep class go.** { *; }`)
+	if bindJavaPkg != "" {
+		fmt.Fprintln(w, `-keep class `+bindJavaPkg+`.** { *; }`)
+	} else {
+		for _, p := range pkgs {
+			fmt.Fprintln(w, `-keep class `+p.Name+`.** { *; }`)
+		}
+	}
 
 	w, err = aarwcreate("classes.jar")
 	if err != nil {
 		return err
 	}
-	src := filepath.Join(androidDir, "src/main/java")
-	if err := buildJar(w, src); err != nil {
+	if err := buildJar(w, srcDir); err != nil {
 		return err
 	}
 
-	assetsDir := filepath.Join(pkg.Dir, "assets")
-	assetsDirExists := false
-	if fi, err := os.Stat(assetsDir); err == nil {
-		assetsDirExists = fi.IsDir()
-	} else if !os.IsNotExist(err) {
-		return err
-	}
+	files := map[string]string{}
+	for _, pkg := range pkgs {
+		assetsDir := filepath.Join(pkg.Dir, "assets")
+		assetsDirExists := false
+		if fi, err := os.Stat(assetsDir); err == nil {
+			assetsDirExists = fi.IsDir()
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 
-	if assetsDirExists {
-		err := filepath.Walk(
-			assetsDir, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
+		if assetsDirExists {
+			err := filepath.Walk(
+				assetsDir, func(path string, info os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					if info.IsDir() {
+						return nil
+					}
+					f, err := os.Open(path)
+					if err != nil {
+						return err
+					}
+					defer f.Close()
+					name := "assets/" + path[len(assetsDir)+1:]
+					if orig, exists := files[name]; exists {
+						return fmt.Errorf("package %s asset name conflict: %s already added from package %s",
+							pkg.ImportPath, name, orig)
+					}
+					files[name] = pkg.ImportPath
+					w, err := aarwcreate(name)
+					if err != nil {
+						return nil
+					}
+					_, err = io.Copy(w, f)
 					return err
-				}
-				if info.IsDir() {
-					return nil
-				}
-				f, err := os.Open(path)
-				if err != nil {
-					return err
-				}
-				defer f.Close()
-				name := "assets/" + path[len(assetsDir)+1:]
-				w, err := aarwcreate(name)
-				if err != nil {
-					return nil
-				}
-				_, err = io.Copy(w, f)
+				})
+			if err != nil {
 				return err
-			})
-		if err != nil {
-			return err
+			}
 		}
 	}
 
-	lib := "armeabi-v7a/libgojni.so"
-	w, err = aarwcreate("jni/" + lib)
-	if err != nil {
-		return err
-	}
-	if !buildN {
-		r, err := os.Open(filepath.Join(androidDir, "src/main/jniLibs/"+lib))
+	for _, arch := range androidArchs {
+		toolchain := ndk.Toolchain(arch)
+		lib := toolchain.abi + "/libgojni.so"
+		w, err = aarwcreate("jni/" + lib)
 		if err != nil {
 			return err
 		}
-		defer r.Close()
-		if _, err := io.Copy(w, r); err != nil {
-			return err
+		if !buildN {
+			r, err := os.Open(filepath.Join(androidDir, "src/main/jniLibs/"+lib))
+			if err != nil {
+				return err
+			}
+			defer r.Close()
+			if _, err := io.Copy(w, r); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -270,7 +278,8 @@ func buildJar(w io.Writer, srcDir string) error {
 		}
 	}
 
-	apiPath, err := androidAPIPath()
+	bClspath, err := bootClasspath()
+
 	if err != nil {
 		return err
 	}
@@ -279,8 +288,12 @@ func buildJar(w io.Writer, srcDir string) error {
 		"-d", dst,
 		"-source", javacTargetVer,
 		"-target", javacTargetVer,
-		"-bootclasspath", filepath.Join(apiPath, "android.jar"),
+		"-bootclasspath", bClspath,
 	}
+	if bindClasspath != "" {
+		args = append(args, "-classpath", bindClasspath)
+	}
+
 	args = append(args, srcFiles...)
 
 	javac := exec.Command("javac", args...)
@@ -292,6 +305,10 @@ func buildJar(w io.Writer, srcDir string) error {
 	if buildX {
 		printcmd("jar c -C %s .", dst)
 	}
+	return writeJar(w, dst)
+}
+
+func writeJar(w io.Writer, dir string) error {
 	if buildN {
 		return nil
 	}
@@ -308,14 +325,14 @@ func buildJar(w io.Writer, srcDir string) error {
 	}
 	fmt.Fprintf(f, manifestHeader)
 
-	err = filepath.Walk(dst, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
 			return nil
 		}
-		out, err := jarwcreate(filepath.ToSlash(path[len(dst)+1:]))
+		out, err := jarwcreate(filepath.ToSlash(path[len(dir)+1:]))
 		if err != nil {
 			return err
 		}

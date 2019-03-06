@@ -2,11 +2,38 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin linux
+// +build darwin linux openbsd
 
 #include <stdlib.h>
 #include "_cgo_export.h"
 #include "work.h"
+
+#if defined(GL_ES_VERSION_3_0) && GL_ES_VERSION_3_0
+#else
+#include <stdio.h>
+static void gles3missing() {
+	printf("GLES3 function is missing\n");
+	exit(2);
+}
+static void glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { gles3missing(); }
+static void glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { gles3missing(); }
+static void glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { gles3missing(); }
+static void glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { gles3missing(); }
+static void glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { gles3missing(); }
+static void glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { gles3missing(); }
+static void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) { gles3missing(); }
+static void glUniform1ui(GLint location, GLuint v0) { gles3missing(); }
+static void glUniform2ui(GLint location, GLuint v0, GLuint v1) { gles3missing(); }
+static void glUniform3ui(GLint location, GLuint v0, GLuint v1, GLuint v2) { gles3missing(); }
+static void glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3) { gles3missing(); }
+static void glUniform1uiv(GLint location, GLsizei count, const GLuint *value) { gles3missing(); }
+static void glUniform2uiv(GLint location, GLsizei count, const GLuint *value) { gles3missing(); }
+static void glUniform3uiv(GLint location, GLsizei count, const GLuint *value) { gles3missing(); }
+static void glUniform4uiv(GLint location, GLsizei count, const GLuint *value) { gles3missing(); }
+static void glBindVertexArray(GLuint array) { gles3missing(); }
+static void glGenVertexArrays(GLsizei n, GLuint *arrays) { gles3missing(); }
+static void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) { gles3missing(); }
+#endif
 
 uintptr_t processFn(struct fnargs* args, char* parg) {
 	uintptr_t ret = 0;
@@ -22,7 +49,6 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 		break;
 	case glfnBindAttribLocation:
 		glBindAttribLocation((GLint)args->a0, (GLint)args->a1, (GLchar*)args->a2);
-		free((void*)args->a2);
 		break;
 	case glfnBindBuffer:
 		glBindBuffer((GLenum)args->a0, (GLuint)args->a1);
@@ -35,6 +61,9 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 		break;
 	case glfnBindTexture:
 		glBindTexture((GLenum)args->a0, (GLint)args->a1);
+		break;
+	case glfnBindVertexArray:
+		glBindVertexArray((GLenum)args->a0);
 		break;
 	case glfnBlendColor:
 		glBlendColor(*(GLfloat*)&args->a0, *(GLfloat*)&args->a1, *(GLfloat*)&args->a2, *(GLfloat*)&args->a3);
@@ -50,6 +79,9 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 		break;
 	case glfnBlendFuncSeparate:
 		glBlendFuncSeparate((GLenum)args->a0, (GLenum)args->a1, (GLenum)args->a2, (GLenum)args->a3);
+		break;
+	case glfnBlitFramebuffer:
+		glBlitFramebuffer((GLint)args->a0, (GLint)args->a1, (GLint)args->a2, (GLint)args->a3, (GLint)args->a4, (GLint)args->a5, (GLint)args->a6, (GLint)args->a7, (GLbitfield)args->a8, (GLenum)args->a9);
 		break;
 	case glfnBufferData:
 		glBufferData((GLenum)args->a0, (GLsizeiptr)args->a1, (GLvoid*)parg, (GLenum)args->a2);
@@ -117,6 +149,9 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 	case glfnDeleteTexture:
 		glDeleteTextures(1, (const GLuint*)(&args->a0));
 		break;
+	case glfnDeleteVertexArray:
+		glDeleteVertexArrays(1, (const GLuint*)(&args->a0));
+		break;
 	case glfnDepthFunc:
 		glDepthFunc((GLenum)args->a0);
 		break;
@@ -174,6 +209,9 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 	case glfnGenTexture:
 		glGenTextures(1, (GLuint*)&ret);
 		break;
+	case glfnGenVertexArray:
+		glGenVertexArrays(1, (GLuint*)&ret);
+		break;
 	case glfnGenerateMipmap:
 		glGenerateMipmap((GLenum)args->a0);
 		break;
@@ -183,9 +221,9 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 			(GLuint)args->a1,
 			(GLsizei)args->a2,
 			NULL,
-			(GLint*)args->a4,
-			(GLenum*)args->a5,
-			(GLchar*)args->a6);
+			(GLint*)&ret,
+			(GLenum*)args->a3,
+			(GLchar*)parg);
 		break;
 	case glfnGetActiveUniform:
 		glGetActiveUniform(
@@ -193,19 +231,18 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 			(GLuint)args->a1,
 			(GLsizei)args->a2,
 			NULL,
-			(GLint*)args->a4,
-			(GLenum*)args->a5,
-			(GLchar*)args->a6);
+			(GLint*)&ret,
+			(GLenum*)args->a3,
+			(GLchar*)parg);
 		break;
 	case glfnGetAttachedShaders:
-		glGetAttachedShaders((GLuint)args->a0, (GLsizei)args->a1, (GLsizei*)args->a2, (GLuint*)args->a3);
+		glGetAttachedShaders((GLuint)args->a0, (GLsizei)args->a1, (GLsizei*)&ret, (GLuint*)parg);
 		break;
 	case glfnGetAttribLocation:
 		ret = glGetAttribLocation((GLint)args->a0, (GLchar*)args->a1);
-		free((void*)args->a1);
 		break;
 	case glfnGetBooleanv:
-		glGetBooleanv((GLenum)args->a0, (GLboolean*)args->a1);
+		glGetBooleanv((GLenum)args->a0, (GLboolean*)parg);
 		break;
 	case glfnGetBufferParameteri:
 		glGetBufferParameteriv((GLenum)args->a0, (GLenum)args->a1, (GLint*)&ret);
@@ -226,7 +263,7 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 		glGetProgramiv((GLint)args->a0, (GLenum)args->a1, (GLint*)&ret);
 		break;
 	case glfnGetProgramInfoLog:
-		glGetProgramInfoLog((GLuint)args->a0, (GLsizei)args->a1, (GLsizei*)args->a2, (GLchar*)args->a3);
+		glGetProgramInfoLog((GLuint)args->a0, (GLsizei)args->a1, 0, (GLchar*)parg);
 		break;
 	case glfnGetRenderbufferParameteriv:
 		glGetRenderbufferParameteriv((GLenum)args->a0, (GLenum)args->a1, (GLint*)&ret);
@@ -235,13 +272,13 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 		glGetShaderiv((GLint)args->a0, (GLenum)args->a1, (GLint*)&ret);
 		break;
 	case glfnGetShaderInfoLog:
-		glGetShaderInfoLog((GLuint)args->a0, (GLsizei)args->a1, (GLsizei*)args->a2, (GLchar*)args->a3);
+		glGetShaderInfoLog((GLuint)args->a0, (GLsizei)args->a1, 0, (GLchar*)parg);
 		break;
 	case glfnGetShaderPrecisionFormat:
-		glGetShaderPrecisionFormat((GLenum)args->a0, (GLenum)args->a1, (GLint*)args->a2, (GLint*)args->a3);
+		glGetShaderPrecisionFormat((GLenum)args->a0, (GLenum)args->a1, (GLint*)parg, &((GLint*)parg)[2]);
 		break;
 	case glfnGetShaderSource:
-		glGetShaderSource((GLuint)args->a0, (GLsizei)args->a1, (GLsizei*)args->a2, (GLchar*)args->a3);
+		glGetShaderSource((GLuint)args->a0, (GLsizei)args->a1, 0, (GLchar*)parg);
 		break;
 	case glfnGetString:
 		ret = (uintptr_t)glGetString((GLenum)args->a0);
@@ -259,8 +296,7 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 		glGetUniformiv((GLuint)args->a0, (GLint)args->a1, (GLint*)parg);
 		break;
 	case glfnGetUniformLocation:
-		ret = glGetUniformLocation((GLint)args->a0, (GLchar*)parg);
-		free((void*)args->a1);
+		ret = glGetUniformLocation((GLint)args->a0, (GLchar*)args->a1);
 		break;
 	case glfnGetVertexAttribfv:
 		glGetVertexAttribfv((GLuint)args->a0, (GLenum)args->a1, (GLfloat*)parg);
@@ -325,8 +361,6 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 #else
 		glShaderSource((GLuint)args->a0, (GLsizei)args->a1, (const GLchar **)args->a2, NULL);
 #endif
-		free(*(void**)args->a2);
-		free((void*)args->a2);
 		break;
 	case glfnStencilFunc:
 		glStencilFunc((GLenum)args->a0, (GLint)args->a1, (GLuint)args->a2);
@@ -391,6 +425,12 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 	case glfnUniform1i:
 		glUniform1i((GLint)args->a0, (GLint)args->a1);
 		break;
+	case glfnUniform1ui:
+		glUniform1ui((GLint)args->a0, (GLuint)args->a1);
+		break;
+	case glfnUniform1uiv:
+		glUniform1uiv((GLint)args->a0, (GLsizeiptr)args->a1, (GLuint*)parg);
+		break;
 	case glfnUniform1iv:
 		glUniform1iv((GLint)args->a0, (GLsizeiptr)args->a1, (GLvoid*)parg);
 		break;
@@ -402,6 +442,12 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 		break;
 	case glfnUniform2i:
 		glUniform2i((GLint)args->a0, (GLint)args->a1, (GLint)args->a2);
+		break;
+	case glfnUniform2ui:
+		glUniform2ui((GLint)args->a0, (GLuint)args->a1, (GLuint)args->a2);
+		break;
+	case glfnUniform2uiv:
+		glUniform2uiv((GLint)args->a0, (GLsizeiptr)args->a1, (GLuint*)parg);
 		break;
 	case glfnUniform2iv:
 		glUniform2iv((GLint)args->a0, (GLsizeiptr)args->a1, (GLvoid*)parg);
@@ -415,6 +461,12 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 	case glfnUniform3i:
 		glUniform3i((GLint)args->a0, (GLint)args->a1, (GLint)args->a2, (GLint)args->a3);
 		break;
+	case glfnUniform3ui:
+		glUniform3ui((GLint)args->a0, (GLuint)args->a1, (GLuint)args->a2, (GLuint)args->a3);
+		break;
+	case glfnUniform3uiv:
+		glUniform3uiv((GLint)args->a0, (GLsizeiptr)args->a1, (GLuint*)parg);
+		break;
 	case glfnUniform3iv:
 		glUniform3iv((GLint)args->a0, (GLsizeiptr)args->a1, (GLvoid*)parg);
 		break;
@@ -427,6 +479,12 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 	case glfnUniform4i:
 		glUniform4i((GLint)args->a0, (GLint)args->a1, (GLint)args->a2, (GLint)args->a3, (GLint)args->a4);
 		break;
+	case glfnUniform4ui:
+		glUniform4ui((GLint)args->a0, (GLuint)args->a1, (GLuint)args->a2, (GLuint)args->a3, (GLuint)args->a4);
+		break;
+	case glfnUniform4uiv:
+		glUniform4uiv((GLint)args->a0, (GLsizeiptr)args->a1, (GLuint*)parg);
+		break;
 	case glfnUniform4iv:
 		glUniform4iv((GLint)args->a0, (GLsizeiptr)args->a1, (GLvoid*)parg);
 		break;
@@ -438,6 +496,24 @@ uintptr_t processFn(struct fnargs* args, char* parg) {
 		break;
 	case glfnUniformMatrix4fv:
 		glUniformMatrix4fv((GLint)args->a0, (GLsizeiptr)args->a1, 0, (GLvoid*)parg);
+		break;
+	case glfnUniformMatrix2x3fv:
+		glUniformMatrix2x3fv((GLint)args->a0, (GLsizeiptr)args->a1, 0, (GLvoid*)parg);
+		break;
+	case glfnUniformMatrix3x2fv:
+		glUniformMatrix3x2fv((GLint)args->a0, (GLsizeiptr)args->a1, 0, (GLvoid*)parg);
+		break;
+	case glfnUniformMatrix2x4fv:
+		glUniformMatrix2x4fv((GLint)args->a0, (GLsizeiptr)args->a1, 0, (GLvoid*)parg);
+		break;
+	case glfnUniformMatrix4x2fv:
+		glUniformMatrix4x2fv((GLint)args->a0, (GLsizeiptr)args->a1, 0, (GLvoid*)parg);
+		break;
+	case glfnUniformMatrix3x4fv:
+		glUniformMatrix3x4fv((GLint)args->a0, (GLsizeiptr)args->a1, 0, (GLvoid*)parg);
+		break;
+	case glfnUniformMatrix4x3fv:
+		glUniformMatrix4x3fv((GLint)args->a0, (GLsizeiptr)args->a1, 0, (GLvoid*)parg);
 		break;
 	case glfnUseProgram:
 		glUseProgram((GLint)args->a0);

@@ -32,6 +32,8 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 
+import mobile.Mobile;
+
 /*
  * Main activity that consists of an edit view to accept the expression
  * and a web view to display output of the expression.
@@ -85,7 +87,7 @@ public class MainActivity extends AppCompatActivity {
 
         /* For webview debugging - visit chrome://inspect/#devices */
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            if (0 != (getApplicationInfo().flags &= ApplicationInfo.FLAG_DEBUGGABLE))
+            if (0 != (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE))
             { WebView.setWebContentsDebuggingEnabled(true); }
         }
     }
@@ -162,7 +164,7 @@ public class MainActivity extends AppCompatActivity {
         mScroller.addView(mWebView);
 
         mEditText.setText("");
-        Mobile.Reset();
+        Mobile.reset();
         unloadDemo();
     }
 
@@ -253,7 +255,7 @@ public class MainActivity extends AppCompatActivity {
             try {
                 // org.golang.ivy.Mobile was generated using
                 // gomobile bind -javapkg=org.golang.ivy robpike.io/ivy/mobile
-                return Mobile.Eval(expr);  // Gobind-generated method.
+                return Mobile.eval(expr);  // Gobind-generated method.
             } catch (Exception e) {
                 return "error: "+e.getMessage();
             }

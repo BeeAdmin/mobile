@@ -4,16 +4,16 @@
 
 package go;
 
-import android.util.Log;
-import android.test.suitebuilder.annotation.Suppress;
-import android.test.AndroidTestCase;
+import android.test.InstrumentationTestCase;
 import android.test.MoreAsserts;
+
 import java.util.Arrays;
 import java.util.Random;
 
-import go.testpkg.Testpkg;
+import testpkg.*;
+import secondpkg.Secondpkg;
 
-public class SeqTest extends AndroidTestCase {
+public class SeqTest extends InstrumentationTestCase {
   public SeqTest() {
   }
 
@@ -34,6 +34,22 @@ public class SeqTest extends AndroidTestCase {
     assertEquals("const Log2E", 1/0.693147180559945309417232121458176568075500134360255254120680009, Testpkg.Log2E, 0.0001);
   }
 
+  public void testRefMap() {
+    // Ensure that the RefMap.live count is kept in sync
+    // even a particular reference number is removed and
+    // added again
+    Seq.RefMap m = new Seq.RefMap();
+    Seq.Ref r = new Seq.Ref(1, null);
+    m.put(r.refnum, r);
+    m.remove(r.refnum);
+    m.put(r.refnum, r);
+    // Force the RefMap to grow, to activate the sanity
+    // checking of the live count in RefMap.grow.
+    for (int i = 2; i < 24; i++) {
+      m.put(i, new Seq.Ref(i, null));
+    }
+  }
+
   public void testVar() {
     assertEquals("var StringVar", "a string var", Testpkg.getStringVar());
 
@@ -47,40 +63,47 @@ public class SeqTest extends AndroidTestCase {
     Testpkg.setIntVar(newIntVar);
     assertEquals("var IntVar", newIntVar, Testpkg.getIntVar());
 
-    Testpkg.S s0 = Testpkg.getStructVar();
-    assertEquals("var StructVar", "a struct var", s0.String());
-    Testpkg.S s1 = Testpkg.New();
+    S s0 = Testpkg.getStructVar();
+    assertEquals("var StructVar", "a struct var", s0.string());
+    S s1 = Testpkg.new_();
     Testpkg.setStructVar(s1);
-    assertEquals("var StructVar", s1.String(), Testpkg.getStructVar().String());
-
-    // TODO(hyangah): handle nil return value (translate to null)
+    assertEquals("var StructVar", s1.string(), Testpkg.getStructVar().string());
 
     AnI obj = new AnI();
     obj.name = "this is an I";
     Testpkg.setInterfaceVar(obj);
-    assertEquals("var InterfaceVar", obj.String(), Testpkg.getInterfaceVar().String());
+    assertEquals("var InterfaceVar", obj.string(), Testpkg.getInterfaceVar().string());
   }
 
   public void testAssets() {
+    // Make sure that a valid context is set before reading assets
+    Seq.setContext(getInstrumentation().getContext());
     String want = "Hello, Assets.\n";
-    String got = Testpkg.ReadAsset();
+    String got = Testpkg.readAsset();
     assertEquals("Asset read", want, got);
   }
 
   public void testAdd() {
-    long res = Testpkg.Add(3, 4);
+    long res = Testpkg.add(3, 4);
     assertEquals("Unexpected arithmetic failure", 7, res);
   }
 
   public void testBool() {
-    assertTrue(Testpkg.Negate(false));
-    assertFalse(Testpkg.Negate(true));
+    assertTrue(Testpkg.negate(false));
+    assertFalse(Testpkg.negate(true));
   }
 
   public void testShortString() {
     String want = "a short string";
-    String got = Testpkg.StrDup(want);
+    String got = Testpkg.strDup(want);
     assertEquals("Strings should match", want, got);
+
+    want = "";
+    got = Testpkg.strDup(want);
+    assertEquals("Strings should match (empty string)", want, got);
+
+    got = Testpkg.strDup(null);
+    assertEquals("Strings should match (null string)", want, got);
   }
 
   public void testLongString() {
@@ -89,24 +112,45 @@ public class SeqTest extends AndroidTestCase {
       b.append("0123456789");
     }
     String want = b.toString();
-    String got = Testpkg.StrDup(want);
+    String got = Testpkg.strDup(want);
     assertEquals("Strings should match", want, got);
   }
 
   public void testUnicode() {
-    String want = "Hello, 世界";
-    String got = Testpkg.StrDup(want);
-    assertEquals("Strings should match", want, got);
+    String[] tests = new String[]{
+      "abcxyz09{}",
+      "Hello, 世界",
+      "\uffff\uD800\uDC00\uD800\uDC01\uD808\uDF45\uDBFF\uDFFF",
+      // From Go std lib tests in unicode/utf16/utf16_test.go
+      "\u0001\u0002\u0003\u0004",
+      "\uffff\ud800\udc00\ud800\udc01\ud808\udf45\udbff\udfff",
+      "\ud800a",
+      "\udfff"
+    };
+    String[] wants = new String[]{
+      "abcxyz09{}",
+      "Hello, 世界",
+      "\uffff\uD800\uDC00\uD800\uDC01\uD808\uDF45\uDBFF\uDFFF",
+      "\u0001\u0002\u0003\u0004",
+      "\uffff\ud800\udc00\ud800\udc01\ud808\udf45\udbff\udfff",
+      "\ufffda",
+      "\ufffd"
+    };
+    for (int i = 0; i < tests.length; i++) {
+      String got = Testpkg.strDup(tests[i]);
+      String want = wants[i];
+      assertEquals("Strings should match", want, got);
+    }
   }
 
   public void testNilErr() throws Exception {
-    Testpkg.Err(null); // returns nil, no exception
+    Testpkg.err(null); // returns nil, no exception
   }
 
   public void testErr() {
     String msg = "Go errors are dropped into the confusing space of exceptions";
     try {
-      Testpkg.Err(msg);
+      Testpkg.err(msg);
       fail("expected non-nil error to be turned into an exception");
     } catch (Exception e) {
       assertEquals("messages should match", msg, e.getMessage());
@@ -116,9 +160,9 @@ public class SeqTest extends AndroidTestCase {
   public void testByteArray() {
     for (int i = 0; i < 2048; i++) {
       if (i == 0) {
-        byte[] got = Testpkg.BytesAppend(null, null);
+        byte[] got = Testpkg.bytesAppend(null, null);
         assertEquals("Bytes(null+null) should match", (byte[])null, got);
-        got = Testpkg.BytesAppend(new byte[0], new byte[0]);
+        got = Testpkg.bytesAppend(new byte[0], new byte[0]);
         assertEquals("Bytes(empty+empty) should match", (byte[])null, got);
         continue;
       }
@@ -134,7 +178,7 @@ public class SeqTest extends AndroidTestCase {
       if (i > 1) {
         s2 = Arrays.copyOfRange(want, 1, i);
       }
-      byte[] got = Testpkg.BytesAppend(s1, s2);
+      byte[] got = Testpkg.bytesAppend(s1, s2);
       MoreAsserts.assertEquals("Bytes(len="+i+") should match", want, got);
     }
   }
@@ -147,7 +191,7 @@ public class SeqTest extends AndroidTestCase {
     }
 
     String stuff = "stuff";
-    byte[] got = Testpkg.AppendToString(stuff, bytes);
+    byte[] got = Testpkg.appendToString(stuff, bytes);
 
     try {
       byte[] s = stuff.getBytes("UTF-8");
@@ -161,50 +205,50 @@ public class SeqTest extends AndroidTestCase {
   }
 
   public void testGoRefGC() {
-    Testpkg.S s = Testpkg.New();
+    S s = Testpkg.new_();
     runGC();
-    long collected = Testpkg.NumSCollected();
+    long collected = Testpkg.numSCollected();
     assertEquals("Only S should be pinned", 0, collected);
 
     s = null;
     runGC();
-    collected = Testpkg.NumSCollected();
+    collected = Testpkg.numSCollected();
     assertEquals("S should be collected", 1, collected);
   }
 
-  private class AnI extends Testpkg.I.Stub {
-    public void E() throws Exception {
+  private class AnI implements I {
+    public void e() throws Exception {
       throw new Exception("my exception from E");
     }
 
     boolean calledF;
-    public void F() {
+    public void f() {
       calledF = true;
     }
 
-    public Testpkg.I I() {
+    public I i() {
       return this;
     }
 
-    public Testpkg.S S() {
-      return Testpkg.New();
+    public S s() {
+      return Testpkg.new_();
     }
 
-    public String StoString(Testpkg.S s) {
-      return s.String();
+    public String stoString(S s) {
+      return s.string();
     }
 
-    public long V() {
+    public long v() {
       return 1234;
     }
 
-    public long VE() throws Exception {
+    public long ve() throws Exception {
       throw new Exception("my exception from VE");
     }
 
     public String name;
 
-    public String String() {
+    public String string() {
       return name;
     }
 
@@ -215,7 +259,7 @@ public class SeqTest extends AndroidTestCase {
   public void testInterfaceMethodReturnsError() {
     final AnI obj = new AnI();
     try {
-      Testpkg.CallE(obj);
+      Testpkg.callE(obj);
       fail("Expecting exception but none was thrown.");
     } catch (Exception e) {
       assertEquals("Error messages should match", "my exception from E", e.getMessage());
@@ -224,47 +268,47 @@ public class SeqTest extends AndroidTestCase {
 
   public void testInterfaceMethodVoid() {
     final AnI obj = new AnI();
-    Testpkg.CallF(obj);
+    Testpkg.callF(obj);
     assertTrue("Want AnI.F to be called", obj.calledF);
   }
 
   public void testInterfaceMethodReturnsInterface() {
     AnI obj = new AnI();
     obj.name = "testing AnI.I";
-    Testpkg.I i = Testpkg.CallI(obj);
-    assertEquals("Want AnI.I to return itself", i.String(), obj.String());
+    I i = Testpkg.callI(obj);
+    assertEquals("Want AnI.I to return itself", i.string(), obj.string());
 
     runGC();
 
-    i = Testpkg.CallI(obj);
-    assertEquals("Want AnI.I to return itself", i.String(), obj.String());
+    i = Testpkg.callI(obj);
+    assertEquals("Want AnI.I to return itself", i.string(), obj.string());
   }
 
   public void testInterfaceMethodReturnsStructPointer() {
     final AnI obj = new AnI();
     for (int i = 0; i < 5; i++) {
-    	Testpkg.S s = Testpkg.CallS(obj);
-	runGC();
+      S s = Testpkg.callS(obj);
+      runGC();
     }
   }
 
   public void testInterfaceMethodTakesStructPointer() {
     final AnI obj = new AnI();
-    Testpkg.S s = Testpkg.CallS(obj);
-    String got = obj.StoString(s);
-    String want = s.String();
+    S s = Testpkg.callS(obj);
+    String got = obj.stoString(s);
+    String want = s.string();
     assertEquals("Want AnI.StoString(s) to call s's String", want, got);
   }
 
   public void testInterfaceMethodReturnsInt() {
     final AnI obj = new AnI();
-    assertEquals("Values must match", 1234, Testpkg.CallV(obj));
+    assertEquals("Values must match", 1234, Testpkg.callV(obj));
   }
 
   public void testInterfaceMethodReturnsIntOrError() {
     final AnI obj = new AnI();
     try {
-      long v = Testpkg.CallVE(obj);
+      long v = Testpkg.callVE(obj);
       fail("Expecting exception but none was thrown and got value " + v);
     } catch (Exception e) {
       assertEquals("Error messages should match", "my exception from VE", e.getMessage());
@@ -284,9 +328,9 @@ public class SeqTest extends AndroidTestCase {
   public void testJavaRefGC() {
     finalizedAnI = false;
     AnI obj = new AnI_Traced();
-    Testpkg.CallF(obj);
+    Testpkg.callF(obj);
     assertTrue("want F to be called", obj.calledF);
-    Testpkg.CallF(obj);
+    Testpkg.callF(obj);
     obj = null;
     runGC();
     assertTrue("want obj to be collected", finalizedAnI);
@@ -295,24 +339,60 @@ public class SeqTest extends AndroidTestCase {
   public void testJavaRefKeep() {
     finalizedAnI = false;
     AnI obj = new AnI_Traced();
-    Testpkg.CallF(obj);
-    Testpkg.CallF(obj);
+    Testpkg.callF(obj);
+    Testpkg.callF(obj);
     obj = null;
     runGC();
     assertTrue("want obj not to be kept by Go", finalizedAnI);
 
     finalizedAnI = false;
     obj = new AnI_Traced();
-    Testpkg.Keep(obj);
+    Testpkg.keep(obj);
     obj = null;
     runGC();
     assertFalse("want obj to be kept live by Go", finalizedAnI);
   }
 
+  private int countI = 0;
+
+  private class CountI implements I {
+    public void f() { countI++; }
+
+    public void e() throws Exception {}
+    public I i() { return null; }
+    public S s() { return null; }
+    public String stoString(S s) { return ""; }
+    public long v() { return 0; }
+    public long ve() throws Exception { return 0; }
+    public String string() { return ""; }
+  }
+
+  public void testGoRefMapGrow() {
+    CountI obj = new CountI();
+    Testpkg.keep(obj);
+
+    // Push active references beyond base map size.
+    for (int i = 0; i < 24; i++) {
+      CountI o = new CountI();
+      Testpkg.callF(o);
+      if (i%3==0) {
+        Testpkg.keep(o);
+      }
+    }
+    runGC();
+    for (int i = 0; i < 128; i++) {
+      Testpkg.callF(new CountI());
+    }
+
+    Testpkg.callF(obj); // original object needs to work.
+
+    assertEquals(countI, 1+24+128);
+  }
+
   private void runGC() {
     System.gc();
     System.runFinalization();
-    Testpkg.GC();
+    Testpkg.gc();
     System.gc();
     System.runFinalization();
   }
@@ -320,22 +400,201 @@ public class SeqTest extends AndroidTestCase {
   public void testUnnamedParams() {
     final String msg = "1234567";
     assertEquals("want the length of \"1234567\" passed after unnamed params",
-		    7, Testpkg.UnnamedParams(10, 20, msg));
+		    7, Testpkg.unnamedParams(10, 20, msg));
   }
 
   public void testPointerToStructAsField() {
-    Testpkg.Node a = Testpkg.NewNode("A");
-    Testpkg.Node b = Testpkg.NewNode("B");
+    Node a = Testpkg.newNode("A");
+    Node b = Testpkg.newNode("B");
     a.setNext(b);
-    String got = a.String();
+    String got = a.string();
     assertEquals("want Node A points to Node B", "A:B:<end>", got);
   }
 
+  public void testImplementsInterface() {
+    Interface intf = Testpkg.newConcrete();
+  }
+
   public void testErrorField() {
-    final String want = "an error message";
-    Testpkg.Node n = Testpkg.NewNode("ErrTest");
+    Node n = Testpkg.newNode("ErrTest");
+    Exception want = new Exception("an error message");
     n.setErr(want);
-    String got = n.getErr();
-    assertEquals("want back the error message we set", want, got);
+    Exception got = n.getErr();
+    assertTrue("want back the error we set", want == got);
+    String msg = Testpkg.errorMessage(want);
+    assertEquals("the error message must match", want.getMessage(), msg);
+  }
+
+  public void testErrorDup() {
+    Exception err = Testpkg.getGlobalErr();
+    assertTrue("the Go error instance must preserve its identity", Testpkg.isGlobalErr(err));
+    assertEquals("the Go error message must be preserved", "global err", err.getMessage());
+  }
+
+  //test if we have JNI local reference table overflow error
+  public void testLocalReferenceOverflow() {
+    Testpkg.callWithCallback(new GoCallback() {
+
+      @Override
+      public void varUpdate() {
+        //do nothing
+      }
+    });
+  }
+
+  public void testNullReferences() {
+    assertTrue(Testpkg.callWithNull(null, new NullTest() {
+      public NullTest null_() {
+        return null;
+      }
+    }));
+    assertEquals("Go nil interface is null", null, Testpkg.newNullInterface());
+    assertEquals("Go nil struct pointer is null", null, Testpkg.newNullStruct());
+
+    Issue20330 nullArger = new Issue20330();
+    assertTrue(nullArger.callWithNull(null));
+  }
+
+  public void testPassByteArray() {
+    Testpkg.passByteArray(new B() {
+      @Override public void b(byte[] b) {
+        byte[] want = new byte[]{1, 2, 3, 4};
+        MoreAsserts.assertEquals("bytes should match", want, b);
+      }
+    });
+  }
+
+  public void testReader() {
+    byte[] b = new byte[8];
+    try {
+      long n = Testpkg.readIntoByteArray(b);
+      assertEquals("wrote to the entire byte array", b.length, n);
+      byte[] want = new byte[b.length];
+      for (int i = 0; i < want.length; i++)
+        want[i] = (byte)i;
+      MoreAsserts.assertEquals("bytes should match", want, b);
+     } catch (Exception e) {
+       fail("Failed to write: " + e.toString());
+     }
+  }
+
+  public void testGoroutineCallback() {
+    Testpkg.goroutineCallback(new Receiver() {
+      @Override public void hello(String msg) {
+      }
+    });
+  }
+
+  public void testImportedPkg() {
+    Testpkg.callImportedI(new secondpkg.I() {
+      @Override public long f(long i) {
+        return i;
+      }
+    });
+    assertEquals("imported string should match", Secondpkg.HelloString, Secondpkg.hello());
+    secondpkg.I i = Testpkg.newImportedI();
+    secondpkg.S s = Testpkg.newImportedS();
+    i = Testpkg.getImportedVarI();
+    s = Testpkg.getImportedVarS();
+    assertEquals("numbers should match", 8, i.f(8));
+    assertEquals("numbers should match", 8, s.f(8));
+    Testpkg.setImportedVarI(i);
+    Testpkg.setImportedVarS(s);
+    ImportedFields fields = Testpkg.newImportedFields();
+    i = fields.getI();
+    s = fields.getS();
+    fields.setI(i);
+    fields.setS(s);
+    Testpkg.withImportedI(i);
+    Testpkg.withImportedS(s);
+
+    secondpkg.IF f = new AnI();
+    f = Testpkg.new_();
+    secondpkg.Ser ser = Testpkg.newSer();
+  }
+
+  public void testRoundtripEquality() {
+    I want = new AnI();
+    assertTrue("java object passed through Go should not be wrapped", want == Testpkg.iDup(want));
+    InterfaceDupper idup = new InterfaceDupper(){
+      @Override public Interface iDup(Interface i) {
+        return i;
+      }
+    };
+    assertTrue("Go interface passed through Java should not be wrapped", Testpkg.callIDupper(idup));
+    ConcreteDupper cdup = new ConcreteDupper(){
+      @Override public Concrete cDup(Concrete c) {
+        return c;
+      }
+    };
+    assertTrue("Go struct passed through Java should not be wrapped", Testpkg.callCDupper(cdup));
+  }
+
+  public void testConstructor() {
+    Interface i = new Concrete();
+    i.f();
+
+    S2 s = new S2(1, 2);
+    assertEquals("new S2().sum", 3.0, s.sum());
+    assertEquals("new S2().tryTwoStrings", "gostring", s.tryTwoStrings("go", "string"));
+
+	  new S3();
+
+	  S4 s4 = new S4(123);
+	  assertEquals("Constructor argument", 123, s4.getI());
+
+    s4 = new S4(123.456);
+    assertEquals("Overloaded constructor argument", 123, s4.getI());
+
+    s4 = new S4(false);
+    assertEquals("Exceptional constructor", 0, s4.getI());
+
+    try {
+      s4 = new S4(true);
+      fail("Constructor error wasn't caught");
+    } catch (Exception e) {
+    }
+  }
+
+  public void testEmptyError() {
+    try {
+      Testpkg.emptyError();
+      fail("Empty error wasn't caught");
+    } catch (Exception e) {
+    }
+    EmptyErrorer empty = new EmptyErrorer() {
+      @Override public void emptyError() throws Exception {
+        throw new Exception("");
+      }
+    };
+    try {
+      Testpkg.callEmptyError(empty);
+      fail("Empty exception wasn't caught");
+    } catch (Exception e) {
+    }
+  }
+
+  public void testInitCaller() {
+    Testpkg.init();
+
+    InitCaller initer = Testpkg.newInitCaller();
+    initer.init();
+  }
+
+  public void testSIGPIPE() {
+    Testpkg.testSIGPIPE();
+  }
+
+  public void testTags() {
+    assertEquals("Constant from a tagged file", 42, Testpkg.TaggedConst);
+  }
+
+  public void testClassNameWithPackageName() {
+    testpkg.Testpkg_ o = new secondpkg.Secondpkg_();
+    secondpkg.Secondpkg_ o2 = Secondpkg.newSecondpkg();
+    o2.m();
+    o2.setV("hi");
+    assertEquals(o2.getV(), "hi");
+    Testpkg.clashingParameterFromOtherPackage(o2);
   }
 }

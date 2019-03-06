@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"go/build"
@@ -19,10 +20,17 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/mobile/internal/binres"
 )
 
-func goAndroidBuild(pkg *build.Package) (map[string]bool, error) {
-	libName := path.Base(pkg.ImportPath)
+func goAndroidBuild(pkg *build.Package, androidArchs []string) (map[string]bool, error) {
+	ndkRoot, err := ndkRoot()
+	if err != nil {
+		return nil, err
+	}
+	appName := path.Base(pkg.ImportPath)
+	libName := androidPkgName(appName)
 	manifestPath := filepath.Join(pkg.Dir, "AndroidManifest.xml")
 	manifestData, err := ioutil.ReadFile(manifestPath)
 	if err != nil {
@@ -30,17 +38,12 @@ func goAndroidBuild(pkg *build.Package) (map[string]bool, error) {
 			return nil, err
 		}
 
-		productName := rfc1034Label(libName)
-		if productName == "" {
-			productName = "ProductName" // like xcode.
-		}
-
 		buf := new(bytes.Buffer)
 		buf.WriteString(`<?xml version="1.0" encoding="utf-8"?>`)
 		err := manifestTmpl.Execute(buf, manifestTmplData{
 			// TODO(crawshaw): a better package path.
-			JavaPkgPath: "org.golang.todo." + productName,
-			Name:        strings.Title(libName),
+			JavaPkgPath: "org.golang.todo." + libName,
+			Name:        strings.Title(appName),
 			LibName:     libName,
 		})
 		if err != nil {
@@ -56,21 +59,32 @@ func goAndroidBuild(pkg *build.Package) (map[string]bool, error) {
 			return nil, fmt.Errorf("error parsing %s: %v", manifestPath, err)
 		}
 	}
-	libPath := filepath.Join(tmpdir, "lib"+libName+".so")
 
-	err = goBuild(
-		pkg.ImportPath,
-		androidArmEnv,
-		"-buildmode=c-shared",
-		"-o", libPath,
-	)
-	if err != nil {
-		return nil, err
-	}
+	libFiles := []string{}
+	nmpkgs := make(map[string]map[string]bool) // map: arch -> extractPkgs' output
 
-	nmpkgs, err := extractPkgs(androidArmNM, libPath)
-	if err != nil {
-		return nil, err
+	for _, arch := range androidArchs {
+		env := androidEnv[arch]
+		toolchain := ndk.Toolchain(arch)
+		libPath := "lib/" + toolchain.abi + "/lib" + libName + ".so"
+		libAbsPath := filepath.Join(tmpdir, libPath)
+		if err := mkdir(filepath.Dir(libAbsPath)); err != nil {
+			return nil, err
+		}
+		err = goBuild(
+			pkg.ImportPath,
+			env,
+			"-buildmode=c-shared",
+			"-o", libAbsPath,
+		)
+		if err != nil {
+			return nil, err
+		}
+		nmpkgs[arch], err = extractPkgs(toolchain.Path(ndkRoot, "nm"), libAbsPath)
+		if err != nil {
+			return nil, err
+		}
+		libFiles = append(libFiles, libPath)
 	}
 
 	block, _ := pem.Decode([]byte(debugCert))
@@ -83,7 +97,7 @@ func goAndroidBuild(pkg *build.Package) (map[string]bool, error) {
 	}
 
 	if buildO == "" {
-		buildO = filepath.Base(pkg.Dir) + ".apk"
+		buildO = androidPkgName(filepath.Base(pkg.Dir)) + ".apk"
 	}
 	if !strings.HasSuffix(buildO, ".apk") {
 		return nil, fmt.Errorf("output file name %q does not end in '.apk'", buildO)
@@ -133,39 +147,42 @@ func goAndroidBuild(pkg *build.Package) (map[string]bool, error) {
 		return nil
 	}
 
-	w, err := apkwCreate("AndroidManifest.xml")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := w.Write(manifestData); err != nil {
-		return nil, err
-	}
-
-	w, err = apkwCreate("classes.dex")
+	w, err := apkwCreate("classes.dex")
 	if err != nil {
 		return nil, err
 	}
 	dexData, err := base64.StdEncoding.DecodeString(dexStr)
 	if err != nil {
-		log.Fatal("internal error bad dexStr: %v", err)
+		log.Fatalf("internal error bad dexStr: %v", err)
 	}
 	if _, err := w.Write(dexData); err != nil {
 		return nil, err
 	}
 
-	if err := apkwWriteFile("lib/armeabi/lib"+libName+".so", libPath); err != nil {
-		return nil, err
-	}
-
-	if nmpkgs["golang.org/x/mobile/exp/audio/al"] {
-		dst := "lib/armeabi/libopenal.so"
-		src := filepath.Join(ndkccpath, "openal/"+dst)
-		if err := apkwWriteFile(dst, src); err != nil {
+	for _, libFile := range libFiles {
+		if err := apkwWriteFile(libFile, filepath.Join(tmpdir, libFile)); err != nil {
 			return nil, err
 		}
 	}
 
+	for _, arch := range androidArchs {
+		toolchain := ndk.Toolchain(arch)
+		if nmpkgs[arch]["golang.org/x/mobile/exp/audio/al"] {
+			dst := "lib/" + toolchain.abi + "/libopenal.so"
+			src := filepath.Join(gomobilepath, dst)
+			if _, err := os.Stat(src); err != nil {
+				return nil, errors.New("the Android requires the golang.org/x/mobile/exp/audio/al, but the OpenAL libraries was not found. Please run gomobile init with the -openal flag pointing to an OpenAL source directory.")
+			}
+			if err := apkwWriteFile(dst, src); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	// Add any assets.
+	var arsc struct {
+		iconPath string
+	}
 	assetsDir := filepath.Join(pkg.Dir, "assets")
 	assetsDirExists := true
 	fi, err := os.Stat(assetsDir)
@@ -195,12 +212,61 @@ func goAndroidBuild(pkg *build.Package) (map[string]bool, error) {
 			if info.IsDir() {
 				return nil
 			}
+
+			if rel, err := filepath.Rel(assetsDir, path); rel == "icon.png" && err == nil {
+				arsc.iconPath = path
+				// TODO returning here does not write the assets/icon.png to the final assets output,
+				// making it unavailable via the assets API. Should the file be duplicated into assets
+				// or should assets API be able to retrieve files from the generated resource table?
+				return nil
+			}
+
 			name := "assets/" + path[len(assetsDir)+1:]
 			return apkwWriteFile(name, path)
 		})
 		if err != nil {
 			return nil, fmt.Errorf("asset %v", err)
 		}
+	}
+
+	bxml, err := binres.UnmarshalXML(bytes.NewReader(manifestData), arsc.iconPath != "")
+	if err != nil {
+		return nil, err
+	}
+
+	// generate resources.arsc identifying single xxxhdpi icon resource.
+	if arsc.iconPath != "" {
+		pkgname, err := bxml.RawValueByName("manifest", xml.Name{Local: "package"})
+		if err != nil {
+			return nil, err
+		}
+		tbl, name := binres.NewMipmapTable(pkgname)
+		if err := apkwWriteFile(name, arsc.iconPath); err != nil {
+			return nil, err
+		}
+		w, err := apkwCreate("resources.arsc")
+		if err != nil {
+			return nil, err
+		}
+		bin, err := tbl.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := w.Write(bin); err != nil {
+			return nil, err
+		}
+	}
+
+	w, err = apkwCreate("AndroidManifest.xml")
+	if err != nil {
+		return nil, err
+	}
+	bin, err := bxml.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(bin); err != nil {
+		return nil, err
 	}
 
 	// TODO: add gdbserver to apk?
@@ -211,7 +277,48 @@ func goAndroidBuild(pkg *build.Package) (map[string]bool, error) {
 		}
 	}
 
-	return nmpkgs, nil
+	// TODO: return nmpkgs
+	return nmpkgs[androidArchs[0]], nil
+}
+
+// androidPkgName sanitizes the go package name to be acceptable as a android
+// package name part. The android package name convention is similar to the
+// java package name convention described in
+// https://docs.oracle.com/javase/specs/jls/se8/html/jls-6.html#jls-6.5.3.1
+// but not exactly same.
+func androidPkgName(name string) string {
+	var res []rune
+	for _, r := range name {
+		switch {
+		case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+			res = append(res, r)
+		default:
+			res = append(res, '_')
+		}
+	}
+	if len(res) == 0 || res[0] == '_' || ('0' <= res[0] && res[0] <= '9') {
+		// Android does not seem to allow the package part starting with _.
+		res = append([]rune{'g', 'o'}, res...)
+	}
+	s := string(res)
+	// Look for Java keywords that are not Go keywords, and avoid using
+	// them as a package name.
+	//
+	// This is not a problem for normal Go identifiers as we only expose
+	// exported symbols. The upper case first letter saves everything
+	// from accidentally matching except for the package name.
+	//
+	// Note that basic type names (like int) are not keywords in Go.
+	switch s {
+	case "abstract", "assert", "boolean", "byte", "catch", "char", "class",
+		"do", "double", "enum", "extends", "final", "finally", "float",
+		"implements", "instanceof", "int", "long", "native", "private",
+		"protected", "public", "short", "static", "strictfp", "super",
+		"synchronized", "this", "throw", "throws", "transient", "try",
+		"void", "volatile", "while":
+		s += "_"
+	}
+	return s
 }
 
 // A random uninteresting private key.
